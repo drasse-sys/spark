@@ -1,0 +1,1115 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#FF6B6B">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Spark — Lekseassistent</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:'Nunito','Segoe UI',system-ui,-apple-system,sans-serif;
+background:linear-gradient(160deg,#667eea 0%,#764ba2 50%,#f093fb 100%);
+background-attachment:fixed;min-height:100vh;min-height:100dvh;
+display:flex;align-items:center;justify-content:center;padding:10px;overflow-x:hidden}
+#app{width:100%;max-width:540px;background:rgba(255,255,255,.96);border-radius:26px;
+box-shadow:0 20px 60px rgba(0,0,0,.3);overflow:hidden;display:flex;flex-direction:column;
+height:calc(100dvh - 20px);max-height:900px}
+header{background:linear-gradient(135deg,#FF6B6B,#FFA07A);padding:11px 14px;
+display:flex;align-items:center;gap:8px;flex-shrink:0}
+.logo{font-size:28px;animation:sparkle 2s ease-in-out infinite}
+@keyframes sparkle{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+h1{font-size:18px;font-weight:900;color:#fff;margin:0;letter-spacing:-.4px;line-height:1.1}
+.sub{font-size:10.5px;color:rgba(255,255,255,.88);font-weight:700}
+.hbtn{background:rgba(255,255,255,.28);border:none;border-radius:10px;padding:6px 8px;
+color:#fff;font-weight:800;cursor:pointer;font-size:15px;font-family:inherit}
+.hbtn.off{background:rgba(0,0,0,.22)}
+.hbtn.small{font-size:11px;padding:6px 9px}
+main{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch}
+.pad{padding:18px 16px;display:flex;flex-direction:column;gap:13px}
+.center{text-align:center}
+.big{font-size:42px}
+.t1{font-size:18px;font-weight:900;color:#2d2d3a}
+.t2{font-size:12.5px;color:#666;line-height:1.5;font-weight:600}
+label{font-size:12px;font-weight:800;color:#555;display:block;margin-bottom:5px}
+input[type=text],input[type=password],textarea{width:100%;border:2px solid #e0d4f8;
+border-radius:13px;padding:11px 13px;font-size:15px;font-family:inherit;font-weight:700;
+outline:none;color:#333;background:#fff;transition:border-color .15s}
+input:focus,textarea:focus{border-color:#a78bfa}
+textarea{resize:vertical;line-height:1.5;font-size:14px}
+.btn{background:linear-gradient(135deg,#FF6B6B,#FFA07A);color:#fff;border:none;
+border-radius:15px;padding:14px;font-size:16px;font-weight:900;cursor:pointer;
+font-family:inherit;width:100%;transition:transform .15s}
+.btn:active{transform:scale(.97)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn.ghost{background:#f3f0ff;color:#7c5cbf}
+.btn.sm{padding:10px;font-size:14px}
+.note{background:#FFF9E6;border-radius:12px;padding:11px 14px;font-size:11.5px;
+color:#8B6914;line-height:1.6;font-weight:600}
+.note.warn{background:#FFF0F0;color:#A03030}
+.note.info{background:#EEF4FF;color:#2A4C8B}
+.tabs{display:flex;gap:6px;background:#f3f0ff;border-radius:14px;padding:4px}
+.tab{flex:1;text-align:center;padding:10px 6px;border-radius:11px;font-weight:800;
+font-size:13px;color:#999;cursor:pointer;transition:all .18s}
+.tab.on{background:#fff;color:#7c5cbf;box-shadow:0 2px 8px rgba(0,0,0,.1)}
+.kids{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.kid{padding:7px 13px;border-radius:20px;background:#f3f0ff;color:#7c5cbf;
+font-weight:800;font-size:13px;cursor:pointer;border:2px solid transparent}
+.kid.on{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff}
+.kid.add{background:#fff;border:2px dashed #c0b4f0;color:#a78bfa}
+.drop{border:3px dashed #c0b4f0;border-radius:16px;padding:22px;text-align:center;
+background:#f8f4ff;cursor:pointer}
+.drop img{width:100%;max-height:220px;object-fit:contain;border-radius:12px;display:block}
+.chat{padding:14px 12px;display:flex;flex-direction:column;gap:11px}
+.row{display:flex;align-items:flex-end;gap:6px;animation:up .3s ease}
+@keyframes up{from{transform:translateY(10px);opacity:0}to{transform:none;opacity:1}}
+.row.me{justify-content:flex-end}
+.av{width:31px;height:31px;border-radius:50%;background:linear-gradient(135deg,#FF6B6B,#FFA07A);
+display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.bub{max-width:76%;padding:11px 14px;font-size:15px;line-height:1.55;font-weight:600;
+white-space:pre-wrap;word-wrap:break-word}
+.bub.them{background:#fff;color:#2d2d3a;border:1px solid #f0e8ff;
+border-radius:17px 17px 17px 5px;box-shadow:0 2px 10px rgba(0,0,0,.07)}
+.bub.me{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;
+border-radius:17px 17px 5px 17px}
+.bub.sys{background:#f0f0f0;color:#888;font-size:12px;border-radius:14px}
+.spk{background:#f0e8ff;border:none;border-radius:50%;width:29px;height:29px;
+display:flex;align-items:center;justify-content:center;font-size:13px;flex-shrink:0;cursor:pointer}
+.spk.on{background:linear-gradient(135deg,#FF6B6B,#FFA07A);animation:ring 1s infinite}
+@keyframes ring{0%{box-shadow:0 0 0 0 rgba(255,107,107,.5)}100%{box-shadow:0 0 0 9px rgba(255,107,107,0)}}
+.dots{background:#fff;border:1px solid #f0e8ff;border-radius:17px 17px 17px 5px;
+padding:13px 17px;display:flex;gap:5px}
+.dots i{width:8px;height:8px;border-radius:50%;background:#c0b4f0;animation:bo .8s infinite}
+.dots i:nth-child(2){animation-delay:.2s}.dots i:nth-child(3){animation-delay:.4s}
+@keyframes bo{0%,100%{transform:scale(.8);opacity:.4}50%{transform:scale(1.2);opacity:1}}
+.quick{display:flex;gap:6px;padding:8px 12px 0;flex-wrap:wrap;flex-shrink:0}
+.qb{background:#f3f0ff;border:1.5px solid #e0d4f8;border-radius:16px;padding:7px 12px;
+font-size:12.5px;font-weight:800;color:#7c5cbf;cursor:pointer;font-family:inherit}
+.qb:active{background:#e6ddff}
+footer{padding:9px 12px;border-top:1px solid #f0e8ff;background:#fdfbff;
+display:flex;gap:7px;align-items:flex-end;flex-shrink:0}
+footer textarea{flex:1;border-radius:15px;padding:11px 13px;max-height:96px;
+overflow-y:auto;resize:none;font-size:15px}
+.send{background:linear-gradient(135deg,#FF6B6B,#FFA07A);color:#fff;border:none;
+border-radius:13px;width:44px;height:44px;font-size:19px;cursor:pointer;flex-shrink:0}
+.send:disabled{opacity:.45}
+.stars{display:flex;align-items:center;gap:3px;background:rgba(255,255,255,.25);
+border-radius:11px;padding:5px 8px;font-size:12px;font-weight:900;color:#fff}
+.prof{background:#F4F9F4;border-radius:12px;padding:11px 14px;font-size:11.5px;
+color:#2E5C3E;line-height:1.65;font-weight:600}
+.prof li{margin:3px 0}
+.hide{display:none!important}
+::-webkit-scrollbar{width:5px}
+::-webkit-scrollbar-thumb{background:#d5c9f5;border-radius:3px}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">⚡</div>
+    <div style="flex:1;min-width:0">
+      <h1>Spark</h1>
+      <div class="sub" id="who">Lekseassistenten din 🌟</div>
+    </div>
+    <div class="stars">⭐ <span id="starCount">0</span></div>
+    <button class="hbtn" id="voiceBtn">🔊</button>
+    <button class="hbtn small hide" id="backBtn">←</button>
+    <button class="hbtn small hide" id="newBtn">🔄</button>
+    <button class="hbtn small" id="cogBtn">⚙️</button>
+  </header>
+  <main id="main"></main>
+  <div class="quick hide" id="quick"></div>
+  <footer id="foot" class="hide">
+    <textarea id="msg" rows="1" placeholder="Skriv svaret ditt her... ✏️"></textarea>
+    <button class="send" id="sendBtn">🚀</button>
+  </footer>
+</div>
+
+<script>
+/* ================= SPARK v2 =================
+   Selvstendig lekseassistent. Ingen server.
+   Nøkkel + profiler lagres kun lokalt (localStorage).
+============================================== */
+
+const LS = { key:'spark_key', prov:'spark_prov', model:'spark_model',
+             kids:'spark_kids', active:'spark_active', voice:'spark_voice',
+             sess:'spark_session' };
+
+const PROVIDERS = {
+  gemini:{label:'Google Gemini (GRATIS)', model:'gemini-3.6-flash',
+    hint:'Gratis, uten betalingskort. Nøkkel: aistudio.google.com/apikey', ph:'AIza...'},
+  claude:{label:'Anthropic Claude (betalt)', model:'claude-sonnet-4-6',
+    hint:'Krever betalingskort. Nøkkel: console.anthropic.com', ph:'sk-ant-...'}
+};
+
+// Google pensjonerer modeller jevnlig. Prøver nedover lista automatisk.
+const GEMINI_CHAIN = ['gemini-3.6-flash','gemini-3.5-flash-lite',
+                      'gemini-3.1-flash-lite','gemini-2.5-flash'];
+const RETIRED = /no longer available|not found|NOT_FOUND|is not supported|does not exist/i;
+
+/* Reserve: OpenAI-kompatible tjenester. Brukes KUN med tekst (avskrift), aldri bilde. */
+const BACKUPS = {
+  none:       { label:'Ingen', url:'', model:'' },
+  openrouter: { label:'OpenRouter', url:'https://openrouter.ai/api/v1/chat/completions',
+                model:'meta-llama/llama-3.3-70b-instruct:free',
+                hint:'Gratis modeller finnes. Nøkkel: openrouter.ai/keys' },
+  groq:       { label:'Groq', url:'https://api.groq.com/openai/v1/chat/completions',
+                model:'llama-3.3-70b-versatile',
+                hint:'Rask og gratis. Nøkkel: console.groq.com/keys' }
+};
+let backup    = localStorage.getItem('spark_backup')       || 'none';
+let backupKey = localStorage.getItem('spark_backup_key')   || '';
+let backupMdl = localStorage.getItem('spark_backup_model') || '';
+
+let provider = localStorage.getItem(LS.prov) || 'gemini';
+let apiKey   = localStorage.getItem(LS.key)  || '';
+let model    = localStorage.getItem(LS.model)|| PROVIDERS[provider].model;
+if(provider==='gemini' && /^gemini-2\.5-flash$/.test(model)){
+  model = GEMINI_CHAIN[0];                    // gammel standard -> ny
+  localStorage.setItem(LS.model, model);
+}
+let voiceOn  = localStorage.getItem(LS.voice) !== '0';
+
+/* ---- barneprofiler ---- */
+function blankKid(name){
+  return { name:name||'', age:8, interests:'', stars:0, notes:[], log:[], sessions:[], level:'' };
+}
+let kids = [];
+try { kids = JSON.parse(localStorage.getItem(LS.kids) || '[]'); } catch(e){ kids=[]; }
+if(!kids.length) kids = [blankKid('')];
+kids.forEach(k=>{ if(!k.age) k.age=8; if(!k.log) k.log=[]; if(!k.notes) k.notes=[];
+                  if(!k.sessions) k.sessions=[]; });
+let active = parseInt(localStorage.getItem(LS.active) || '0', 10);
+if(active >= kids.length) active = 0;
+const kid = () => kids[active];
+function saveKids(){
+  localStorage.setItem(LS.kids, JSON.stringify(kids));
+  localStorage.setItem(LS.active, String(active));
+}
+
+/* ---- tilstand ---- */
+let view = apiKey ? 'start' : 'setup';
+let taskMode = 'lekse';       // lekse | matte | lesing | quiz
+
+const MODE_HELP = {
+  matte:  'Regner aldri ut svaret for barnet. Sjekker sin egen regning, og skiller slurvefeil fra begrepsfeil.',
+  lesing: 'Hjelper med forståelse, ord og gjenfortelling — og lærer barnet å finne belegg i teksten. Kan IKKE høre barnet lese høyt.',
+  lekse:  'Vanlig skolearbeid. Spark holder tilbake svaret uansett hvor mye barnet maser.',
+  quiz:   'For rektors quiz og annen allmennkunnskap utenfor pensum. Jobber seg fram til svaret hvis barnet står fast.'
+};
+const MODE_ICON = { matte:'🔢', lesing:'📕', lekse:'📚', quiz:'🧠' };
+const PLACEHOLD = {
+  matte:  'F.eks: «Regn ut 24 + 37» eller «3 poser med 8 epler i hver»',
+  lesing: 'Lim inn teksten han skal lese, eller skriv spørsmålet om teksten',
+  lekse:  'Skriv oppgaven her',
+  quiz:   'F.eks: «Hva heter planetene mellom jorden og sola?»'
+};
+const OPENERS = {
+  matte:  'Her er matteoppgaven min! Hjelp meg å regne den ut selv, ett steg om gangen.',
+  lesing: 'Her er teksten jeg skal jobbe med. Hjelp meg å forstå den!',
+  lekse:  'Her er leksa mi! Kan du hjelpe meg å forstå den?',
+  quiz:   'Her er quiz-spørsmålene mine! Ta dem ett om gangen.'
+};
+const MODE_NAME = { matte:'Matte', lesing:'Lesing', lekse:'Lekser', quiz:'Quiz' };
+let inputMode = 'camera';     // camera | text
+let hwPreview = null, hwText = '';
+let chatMsgs = [], history = [], transcript = '';
+let busy = false, speakingIdx = null, readOnly = false, backupAnnounced = false;
+
+const $ = id => document.getElementById(id);
+const main = $('main'), foot = $('foot'), quick = $('quick');
+const esc = s => (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/* ================= SYSTEMPROMPT ================= */
+function systemPrompt(){
+  const k = kid();
+  const age = k.age || 8;
+  const little = age <= 7;
+
+  let p = `Du er Spark, en varm, leken og oppmuntrende læringsvenn. Svar ALLTID på norsk (bokmål).
+
+## BARNETS ALDER: ${age} år — TILPASS DERETTER
+${little
+? `Dette er et lite barn. Bruk svært enkle ord. Maks 2 korte setninger per melding.
+Barnet leser og skriver sakte - regn med at en voksen sitter ved siden av og hjelper.
+Godta korte svar, tall, og til og med ett enkelt ord. Aldri krev lange skriftlige svar.
+Aldri kritiser skrivefeil.`
+: `Dette barnet leser og skriver selv. Du kan bruke litt mer avanserte ord og
+lengre resonnement, og be om forklaringer med egne ord. Utfordre litt mer.`}
+
+## PERSONLIGHET
+Entusiastisk, tålmodig, litt rampete humor. Feirer innsats, ikke bare riktige svar.
+Gjør ALDRI barnet flaut for feil. Feil er ledetråder, ikke tabber. Emojier av og til.
+
+## FORMAT
+Maks ${little?'2':'4'} setninger per melding, deretter ETT spørsmål. Aldri flere samtidig.
+Aldri lange lister. Ett steg av gangen.
+
+## SLIK LÆRER BARN (forskningsbasert)
+1. LA BARNET PRØVE FØRST. Spør "hva tror du?" før du forklarer noe som helst.
+2. BE OM FORKLARING TILBAKE: "kan du forklare det med dine egne ord?"
+3. KONKRETE EKSEMPLER framfor abstrakte regler.
+4. ALLTID ET HVORFOR - svar uten grunn glemmes.
+5. VARIER: hvis en forklaring ikke funker, IKKE gjenta den saktere. Bytt innfallsvinkel helt.
+
+## PRODUKTIVT STREV - VIKTIG GRENSE
+Litt motstand er bra. Forvirring er det ikke.
+Tell barnets bomforsøk på SAMME steg:
+  1. forsøk → hint, la dem prøve igjen
+  2. forsøk → mindre steg, eller vis ett ledd av framgangsmåten
+  3. forsøk → vis hvordan man tenker, helt konkret, la barnet gjøre siste bit
+Er barnet lei, sint eller stille: gå ned ett nivå med en gang. Ikke vent på tre forsøk.
+Målet er ikke mest mulig strev - det er passe utfordring med hjelp i rett tid.
+
+## POENG
+Når barnet virkelig mestrer noe eller viser god tenkning: skriv POENG-linjen
+"\u2b50 POENG!" på egen linje. Maks ett per melding. Aldri gratis.`;
+
+  if(taskMode === 'matte'){
+    p += `
+
+## MODUS: MATEMATIKK  <- AKTIV NÅ
+Du gir ALDRI det ferdige svaret. Barnet skal regne selv.
+
+REGNE-SIKKERHET (kritisk):
+Regn ALLTID ut selv, steg for steg, før du sier noe om et tall.
+Kontroller svaret ditt en gang til før du skriver det.
+Er du usikker: si "la oss regne det sammen" heller enn å gjette.
+Påstå ALDRI at noe er riktig eller galt uten å ha regnet det etter.
+
+DIAGNOSTISER FEILEN - ikke bare "feil":
+- Leste oppgaven feil (plusset i stedet for å trekke fra)
+- Kan metoden, men bommet på en tallfakta (7+8)
+- Misforstår selve begrepet (tierovergang, plassverdi, brøk)
+- Slurv (mistet et siffer, glemte å låne)
+Begrepsfeil trenger ny forklaring. Slurv trenger bare "prøv igjen, sjekk siste ledd".
+Å behandle slurv som begrepsfeil er slitsomt og fornærmende for barnet.
+
+VERKTØY: telling, tegning i ord, hopp på tallinje, gruppering i tiere,
+oppdeling i mindre tall, konkrete gjenstander barnet har rundt seg.
+Be barnet SJEKKE svaret sitt selv til slutt - det er en vane som varer.`;
+  }
+  else if(taskMode === 'lesing'){
+    p += `
+
+## MODUS: LESING  <- AKTIV NÅ
+OM DINE BEGRENSNINGER: du kan ikke høre barnet lese høyt, så du kan ikke
+vurdere lesehastighet, uttale eller flyt. Ikke lat som. Handler oppgaven om
+å lese høyt, si vennlig: "Denne bør du lese høyt for en voksen - jeg kan ikke
+høre deg. Men jeg kan hjelpe deg med å FORSTÅ teksten!"
+
+SPØRSMÅL SKAL HA EN HENSIKT. Velg bevisst type:
+- HVA STÅR DET: rent oppslag i teksten
+- HVOR STÅR DET: "hvor i teksten ser du det?"  <- bruk denne ofte
+- HVA BETYR ORDET: la barnet gjette ut fra sammenhengen FØR du forklarer
+- HVORFOR: årsak og sammenheng
+- HVA TROR DU: slutning som ikke står direkte
+- HVA HANDLER DET MEST OM: hovedbudskap i én setning
+
+TEKST vs GJETNING — det viktigste her:
+Svarer barnet noe som ikke står i teksten, ikke si "feil". Spør:
+"Står det i teksten, eller tenkte du det selv?"
+Begge deler er lov - men barnet skal vite hvilket det er.
+Finner barnet belegg i teksten: ros det høyt. "Der brukte du et spor fra teksten!"
+
+ORD: ikke stopp ved hvert ukjente ord - bare de som blokkerer forståelsen.
+La barnet gjette fra sammenhengen først, spør så: "hva annet kan være sant om det?"
+
+FORTELLING: hvem, hva vil de, hva stopper dem, hva gjør de, hva sier det om dem.
+FAGTEKST: hovedidé, detaljer som støtter den, hva som er viktig kontra bare morsomt.
+
+Avslutt en bolk med: "fortell meg hva som skjedde, med dine egne ord."`;
+  }
+  else if(taskMode === 'quiz'){
+    p += `
+
+## MODUS: QUIZ / ALLMENNKUNNSKAP  <- AKTIV NÅ
+Dette er ikke pensum. Barnet kan ikke slå det opp, og målet er å LÆRE noe nytt
+- ikke å bli sittende fast.
+Stigen, ett trinn ned hver gang barnet ikke kommer videre:
+  1. HINT — koble til noe barnet allerede vet
+  2. INNSNEVRING — gi to eller tre alternativer
+  3. SVARET — tydelig, og ALLTID med en forklaring som fester seg
+Sier barnet "vet ikke" / "gi opp" / "vis svaret": gå ett trinn ned. Gjentar de det: videre ned.
+Ikke hold igjen svaret når barnet virkelig står fast.
+Etter svaret: ett kjapt oppfølgingsspørsmål så det sitter.`;
+  }
+  else {
+    p += `
+
+## MODUS: LEKSE / PENSUM  <- AKTIV NÅ
+Skolearbeid barnet skal lære seg selv. Du gir ALDRI svaret direkte.
+Ber barnet om svaret: "Hehe, godt forsøk! Men da går du glipp av det beste -
+la meg gi deg et hint i stedet."
+Del oppgaven i små steg. Barnet gjør jobben; du peker vei.`;
+  }
+
+  if(k.name) p += `\n\n## BARNET\nHeter ${k.name}. Bruk navnet naturlig.`;
+  if(k.interests) p += `\nInteresser: ${k.interests}.\nBRUK DETTE aktivt i eksempler - nøkkelen til å holde interessen oppe.`;
+  if(k.notes && k.notes.length){
+    p += `\n\n## HVA SOM HAR FUNKET FØR\n` + k.notes.map(n=>'- '+n).join('\n')
+       + `\nBygg videre på det som funket. Unngå det som ikke funket.`;
+  }
+
+  p += `
+
+## NOTATER TIL NESTE GANG
+Lærer du noe om HVA SOM FUNKER for dette barnet, legg til aller sist:
+[[PROFIL: konkret observasjon, maks 12 ord]]
+Kun observert atferd — aldri diagnoser, aldri personlighetstyper, aldri «lærer visuelt».
+Riktig: "telling på fingre funket bedre enn tegning". Galt: "visuell type".
+Sparsomt: maks én gang per 3-4 meldinger.
+
+## AVSKRIFT — kun i din aller FØRSTE melding, og kun hvis du fikk et bilde
+Legg aller sist: [[OPPGAVE: kort men fullstendig avskrift av oppgaveteksten på bildet]]
+Barnet ser det aldri. Dette gjør at vi slipper å sende bildet på nytt for hver melding,
+noe som sparer mye av dagskvoten.
+
+## INGEN MARKDOWN
+Skriv ren tekst. Ingen stjerner rundt ord, ingen understreker, ingen skråstreker,
+ingen firkanttegn, ingen kodeblokker. Barnet leser teksten rått og hører den lest opp —
+stjerner blir lest høyt som «asterisk» og ødelegger opplevelsen.
+Vil du framheve noe, bruk STORE BOKSTAVER eller bare vanlige ord.
+I matte: skriv «ganger» og «delt på» heller enn symboler når det er naturlig.
+
+## LOGG TIL FORELDRE
+Når en oppgave er ferdig, legg til aller sist:
+[[LOGG: hva vi jobbet med | hva som gikk bra | hva som var vanskelig]]
+Kort og ærlig. Foreldre leser dette for å se hva du faktisk har lært bort.`;
+
+  return p;
+}
+
+/* ================= TALE ================= */
+const synth = window.speechSynthesis;
+function pickVoice(){
+  const v = synth ? synth.getVoices() : [];
+  return v.find(x=>x.lang==='nb-NO') || v.find(x=>x.lang==='nn-NO')
+      || v.find(x=>/^nb|^no/.test(x.lang)) || v.find(x=>x.lang==='da-DK')
+      || v.find(x=>x.lang==='sv-SE') || v[0];
+}
+function speak(text, idx){
+  if(!synth || !voiceOn) return;
+  synth.cancel();
+  const clean = text.replace(/\[\[(?:PROFIL|LOGG|OPPGAVE):[\s\S]*?\]\]/g,'')
+                    .replace(/⭐\s*POENG!?/gi,'')
+                    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu,'')
+                    .replace(/[*_#`~]/g,' ')                    // aldri les «asterisk»
+                    .replace(/(\d)\s*[×x]\s*(\d)/gi,'$1 ganger $2')
+                    .replace(/(\d)\s*\/\s*(\d)/g,'$1 delt på $2')
+                    .replace(/(\d)\s*\+\s*(\d)/g,'$1 pluss $2')
+                    .replace(/(\d)\s*-\s*(\d)/g,'$1 minus $2')
+                    .replace(/\s*=\s*/g,' er lik ')
+                    .replace(/\s+/g,' ').trim();
+  if(!clean) return;
+  const u = new SpeechSynthesisUtterance(clean);
+  const v = pickVoice(); if(v) u.voice = v;
+  u.lang='nb-NO'; u.rate=.9; u.pitch=1.1;
+  u.onstart=()=>{speakingIdx=idx;render()};
+  u.onend=u.onerror=()=>{speakingIdx=null;render()};
+  synth.speak(u);
+}
+function stopSpeak(){ if(synth) synth.cancel(); speakingIdx=null; }
+
+/* ================= BILDE ================= */
+function shrink(file){
+  return new Promise(res=>{
+    const r=new FileReader();
+    r.onload=e=>{
+      const img=new Image();
+      img.onload=()=>{
+        const max=1100; let {width:w,height:h}=img;
+        if(w>max||h>max){const s=max/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}
+        const c=document.createElement('canvas');c.width=w;c.height=h;
+        c.getContext('2d').drawImage(img,0,0,w,h);
+        res(c.toDataURL('image/jpeg',.72));
+      };
+      img.src=e.target.result;
+    };
+    r.readAsDataURL(file);
+  });
+}
+
+/* ====== token-sparing: bytt bildet mot avskriften, klipp gammel historikk ====== */
+function slimHistory(){
+  return history.map(m=>{
+    if(typeof m.content === 'string') return m;
+    const txt = m.content.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    return { role:m.role, content:(transcript ? 'Oppgaven:\n'+transcript+'\n\n' : '') + txt };
+  });
+}
+function payload(){
+  let h = transcript ? slimHistory() : history;   // avskrift finnes -> bildet droppes
+  if(h.length > 14) h = [h[0], ...h.slice(-12)];  // behold oppgaven + siste 12
+  return h;
+}
+
+/* ====== lagring av økt, så ingenting går tapt ved feiltrykk ====== */
+function saveSession(){
+  try{
+    localStorage.setItem(LS.sess, JSON.stringify({
+      kid:active, mode:taskMode, transcript,
+      chatMsgs, history:slimHistory(), ts:Date.now()
+    }));
+  }catch(e){ /* full disk / privat modus - ikke kritisk */ }
+}
+function loadSession(){
+  try{
+    const s = JSON.parse(localStorage.getItem(LS.sess)||'null');
+    if(!s || !s.chatMsgs || !s.chatMsgs.length) return null;
+    return s;
+  }catch(e){ return null; }
+}
+function resumeSession(){
+  const s = loadSession(); if(!s) return;
+  active = Math.min(s.kid||0, kids.length-1);
+  taskMode = s.mode || 'lekse';
+  transcript = s.transcript || '';
+  chatMsgs = s.chatMsgs; history = s.history;
+  view='chat'; render();
+}
+function archiveSession(){
+  if(!chatMsgs.length) return;
+  const k = kid();
+  if(!k.sessions) k.sessions = [];
+  k.sessions.push({
+    d:new Date().toLocaleDateString('no-NO'),
+    m:taskMode,
+    t:(transcript||chatMsgs[0]?.text||'Økt').slice(0,60),
+    msgs:chatMsgs.slice(-40)
+  });
+  if(k.sessions.length > 8) k.sessions.shift();
+  saveKids();
+  localStorage.removeItem(LS.sess);
+}
+
+/* ================= API ================= */
+const DAILY = /per day|daily limit|RESOURCE_EXHAUSTED|exhausted/i;
+
+async function callAI(messages){
+  try{
+    return provider==='gemini' ? await callGemini(messages) : await callClaude(messages);
+  }catch(err){
+    // dagskvoten tom -> gå over til reserven hvis den er satt opp
+    const canFallback = backup!=='none' && backupKey && DAILY.test(err.message||'');
+    if(!canFallback) throw err;
+    if(!transcript && messages.some(m=>Array.isArray(m.content)))
+      throw new Error('Dagskvoten er tom, og bildet er ikke skrevet av ennå. ' +
+                      'Skriv oppgaven som tekst, så fortsetter reserven derfra.');
+    usingBackup = true;
+    return callOpenAICompat(messages);
+  }
+}
+
+let usingBackup = false;
+
+/* Reserven ser aldri bildet — kun avskriften. Derfor slimHistory() alltid. */
+async function callOpenAICompat(messages){
+  const cfg = BACKUPS[backup];
+  const msgs = [{role:'system', content:systemPrompt()}];
+  for(const m of messages){
+    const txt = typeof m.content==='string'
+      ? m.content
+      : (transcript? 'Oppgaven:\n'+transcript+'\n\n':'') +
+        m.content.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    msgs.push({ role: m.role==='assistant'?'assistant':'user', content: txt });
+  }
+  const r = await fetch(cfg.url,{
+    method:'POST',
+    headers:{'content-type':'application/json','authorization':'Bearer '+backupKey},
+    body: JSON.stringify({ model: backupMdl||cfg.model, max_tokens:700, messages:msgs })
+  });
+  const d = await r.json();
+  if(d.error) throw new Error(d.error.message||'Reserve-feil');
+  const t = d.choices?.[0]?.message?.content;
+  if(!t) throw new Error('Tomt svar fra reserven.');
+  return t.trim();
+}
+async function callClaude(messages){
+  const r=await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'content-type':'application/json','x-api-key':apiKey,
+      'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model,max_tokens:900,system:systemPrompt(),messages})
+  });
+  const d=await r.json();
+  if(d.error) throw new Error(d.error.message||'API-feil');
+  return (d.content||[]).filter(b=>b.type==='text').map(b=>b.text).join('\n').trim();
+}
+function toGemini(messages){
+  return messages.map(m=>{
+    const role = m.role==='assistant' ? 'model' : 'user';
+    if(typeof m.content==='string') return {role,parts:[{text:m.content}]};
+    const parts=m.content.map(b=>{
+      if(b.type==='text') return {text:b.text};
+      if(b.type==='image') return {inline_data:{mime_type:b.source.media_type,data:b.source.data}};
+      return null;
+    }).filter(Boolean);
+    return {role,parts};
+  });
+}
+async function geminiOnce(messages, mdl){
+  const url='https://generativelanguage.googleapis.com/v1beta/models/'
+          + encodeURIComponent(mdl)+':generateContent';
+  const r=await fetch(url,{
+    method:'POST',
+    headers:{'content-type':'application/json','x-goog-api-key':apiKey},
+    body:JSON.stringify({
+      system_instruction:{parts:[{text:systemPrompt()}]},
+      contents:toGemini(messages),
+      generationConfig:{maxOutputTokens:900,temperature:0.9}
+    })
+  });
+  const d=await r.json();
+  if(d.error) throw new Error(d.error.message||'API-feil');
+  const c=d.candidates&&d.candidates[0];
+  if(!c) throw new Error('Tomt svar. Prøv igjen.');
+  return (c.content?.parts||[]).map(p=>p.text||'').join('\n').trim();
+}
+
+async function callGemini(messages){
+  // prøv valgt modell; er den pensjonert, gå videre nedover kjeden og husk den som virker
+  const tries = [model, ...GEMINI_CHAIN.filter(m=>m!==model)];
+  let lastErr;
+  for(const m of tries){
+    try{
+      const out = await geminiOnce(messages, m);
+      if(m !== model){ model = m; localStorage.setItem(LS.model, m); }
+      return out;
+    }catch(e){
+      lastErr = e;
+      if(!RETIRED.test(e.message||'')) throw e;   // ekte feil -> ikke prøv videre
+    }
+  }
+  throw lastErr;
+}
+
+/* ============ PROFIL-LÆRING + POENG ============ */
+function harvest(raw){
+  const k = kid();
+  let changed = false;
+
+  // profil-notater
+  const re = /\[\[PROFIL:\s*([^\]]+)\]\]/gi;
+  let m;
+  while((m = re.exec(raw)) !== null){
+    const note = m[1].trim().slice(0,90);
+    if(note && !k.notes.includes(note)){
+      k.notes.push(note);
+      if(k.notes.length > 12) k.notes.shift();   // behold de nyeste
+      changed = true;
+    }
+  }
+
+  // avskrift av oppgaven -> lar oss droppe bildet fra videre kall
+  const ore = /\[\[OPPGAVE:\s*([\s\S]+?)\]\]/i;
+  const om = raw.match(ore);
+  if(om && !transcript) transcript = om[1].trim().slice(0,3000);
+
+  // foreldre-logg
+  const lre = /\[\[LOGG:\s*([^\]]+)\]\]/gi;
+  let lm;
+  while((lm = lre.exec(raw)) !== null){
+    const entry = lm[1].trim().slice(0,200);
+    if(entry){
+      k.log.push({ d:new Date().toLocaleDateString('no-NO'), m:taskMode, t:entry });
+      if(k.log.length > 20) k.log.shift();
+      changed = true;
+    }
+  }
+
+  // stjerner
+  const pts = (raw.match(/⭐\s*POENG/gi)||[]).length;
+  if(pts){ k.stars += pts; changed = true; }
+
+  if(changed) saveKids();
+  return demarkdown(raw.replace(re,'').replace(lre,'').replace(ore,'').trim());
+}
+
+/* Fjerner markdown uten å ødelegge gangetegn (3 * 4 beholdes) */
+function demarkdown(t){
+  return t
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')      // **fet**
+    .replace(/__([^_\n]+)__/g, '$1')            // __fet__
+    .replace(/(^|\s)\*([^*\s][^*\n]*?)\*(?=\s|[.,!?:;]|$)/g, '$1$2')  // *kursiv*
+    .replace(/(^|\s)_([^_\s][^_\n]*?)_(?=\s|[.,!?:;]|$)/g, '$1$2')      // _kursiv_
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')          // ## overskrift
+    .replace(/^\s{0,3}[-*+]\s+/gm, '• ')         // punktliste
+    .replace(/`{1,3}([^`]*)`{1,3}/g, '$1')       // kode
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/* ================= VISNING ================= */
+function render(){
+  const k = kid();
+  $('starCount').textContent = k.stars;
+  $('who').textContent = k.name ? (k.name + ' • ' + MODE_NAME[taskMode]) : 'Lekseassistenten din 🌟';
+  $('voiceBtn').textContent = voiceOn?'🔊':'🔇';
+  $('voiceBtn').className = 'hbtn'+(voiceOn?'':' off');
+  $('newBtn').classList.toggle('hide', view!=='chat');
+  $('backBtn').classList.toggle('hide', view!=='chat');
+  foot.classList.toggle('hide', view!=='chat' || readOnly);
+  quick.classList.toggle('hide', view!=='chat' || readOnly);
+  if(view==='setup') return renderSetup();
+  if(view==='start') return renderStart();
+  if(view==='chat')  return renderChat();
+  if(view==='hist')  return renderHist();
+}
+
+function renderHist(){
+  const k = kid();
+  const list = (k.sessions||[]).slice().reverse();
+  main.innerHTML = `
+  <div class="pad">
+    <div class="center">
+      <div class="big">📂</div>
+      <div class="t1">Tidligere økter</div>
+      <div class="t2">${esc(k.name||'Barnet')} — de siste ${list.length} øktene</div>
+    </div>
+    ${list.map((s,i)=>`
+      <div class="prof" style="cursor:pointer" data-s="${list.length-1-i}">
+        <strong>${esc(s.d)} · ${esc(MODE_NAME[s.m]||s.m)}</strong><br>
+        ${esc(s.t)}<br>
+        <span style="opacity:.6">${s.msgs.length} meldinger — trykk for å lese</span>
+      </div>`).join('') || '<div class="note">Ingen lagrede økter ennå.</div>'}
+    <button class="btn ghost" id="backHist">← Tilbake</button>
+  </div>`;
+  main.querySelectorAll('[data-s]').forEach(el=>el.onclick=()=>{
+    const s = k.sessions[parseInt(el.dataset.s,10)];
+    chatMsgs = s.msgs.slice(); history=[]; transcript='';
+    view='chat'; readOnly=true; render();
+  });
+  $('backHist').onclick=()=>{ view='start'; render(); };
+}
+
+function renderSetup(){
+  const P = PROVIDERS[provider], k = kid();
+  main.innerHTML = `
+  <div class="pad">
+    <div class="center">
+      <div class="big">🔧</div>
+      <div class="t1">Innstillinger</div>
+      <div class="t2">Til foreldre 👇</div>
+    </div>
+
+    <div>
+      <label>AI-tjeneste</label>
+      <div class="tabs" id="provTabs">
+        <div class="tab ${provider==='gemini'?'on':''}" data-p="gemini">🆓 Gemini</div>
+        <div class="tab ${provider==='claude'?'on':''}" data-p="claude">💳 Claude</div>
+      </div>
+      <div class="t2" style="margin-top:6px;font-size:11px">${P.hint}</div>
+    </div>
+
+    <div>
+      <label>API-nøkkel</label>
+      <input type="password" id="fKey" placeholder="${P.ph}" value="${esc(apiKey)}">
+    </div>
+
+    <div>
+      <label>Barn</label>
+      <div class="kids" id="kidRow">
+        ${kids.map((x,i)=>`<div class="kid ${i===active?'on':''}" data-i="${i}">${esc(x.name||'Barn '+(i+1))}</div>`).join('')}
+        <div class="kid add" id="addKid">+ Legg til</div>
+      </div>
+    </div>
+
+    <div style="display:flex;gap:9px">
+      <div style="flex:2">
+        <label>Navn</label>
+        <input type="text" id="fName" placeholder="F.eks. Markus" value="${esc(k.name)}">
+      </div>
+      <div style="flex:1">
+        <label>Alder</label>
+        <input type="text" id="fAge" inputmode="numeric" value="${k.age}">
+      </div>
+    </div>
+    <div class="note info" style="margin-top:-4px">
+      ${k.age<=7
+        ? '<strong>👥 '+esc(k.name||'Barnet')+' er '+k.age+' år.</strong> Spark holder svarene svært korte og enkle. Regn med å sitte ved siden av — lesing og skriving går tregt i denne alderen, og det er sånn det skal være.'
+        : '<strong>🙋 '+esc(k.name||'Barnet')+' er '+k.age+' år.</strong> Spark bruker lengre resonnement og ber om forklaringer med egne ord. Klarer seg stort sett alene.'}
+    </div>
+
+    <div>
+      <label>Interesser — dette er det viktigste feltet</label>
+      <textarea id="fFun" rows="2" placeholder="F.eks: Minecraft, fotball, dinosaurer, traktorer...">${esc(k.interests)}</textarea>
+      <div class="t2" style="margin-top:5px;font-size:11px">
+        Spark vever dette inn i alle forklaringer. Jo mer konkret, jo bedre.
+      </div>
+    </div>
+
+    ${k.notes && k.notes.length ? `
+    <div>
+      <label>Hva Spark har lært om ${esc(k.name||'barnet')}</label>
+      <div class="prof">
+        <ul style="margin:0;padding-left:16px">${k.notes.map(n=>`<li>${esc(n)}</li>`).join('')}</ul>
+      </div>
+      <button class="btn ghost sm" id="clrNotes" style="margin-top:7px">🧹 Nullstill det Spark har lært</button>
+    </div>` : `
+    <div class="note info">
+      <strong>📈 Spark lærer over tid.</strong> Etter noen økter samler den opp
+      hva som faktisk funket — hvilke forklaringer som traff, hva som skapte
+      frustrasjon, hvilket nivå som passer. Det dukker opp her.
+    </div>`}
+
+    <div>
+      <label>🛟 Reserve når dagskvoten er tom</label>
+      <div class="tabs" id="bkTabs">
+        ${Object.keys(BACKUPS).map(b=>
+          `<div class="tab ${backup===b?'on':''}" data-b="${b}">${BACKUPS[b].label}</div>`).join('')}
+      </div>
+      ${backup!=='none'?`
+        <input type="password" id="fBkKey" placeholder="Nøkkel for ${BACKUPS[backup].label}"
+               value="${esc(backupKey)}" style="margin-top:7px">
+        <input type="text" id="fBkMdl" placeholder="${esc(BACKUPS[backup].model)}"
+               value="${esc(backupMdl)}" style="margin-top:6px">
+        <div class="t2" style="margin-top:5px;font-size:11px">${BACKUPS[backup].hint}</div>
+        <div class="note warn" style="margin-top:7px">
+          Reserven får bare <strong>avskriften</strong> av oppgaven, aldri bildet —
+          gratis-modellene der ser vanligvis ikke bilder. Derfor ber Spark alltid
+          Gemini om en avskrift først. Blir kvoten tom midt i en økt, fortsetter
+          reserven på teksten uten at dere mister tråden.
+        </div>` : `
+        <div class="t2" style="margin-top:6px;font-size:11px">
+          Uten reserve stopper leksene til kvoten fornyes neste dag.
+        </div>`}
+    </div>
+
+    ${k.log && k.log.length ? `
+    <div>
+      <label>📋 Undervisningslogg — hva Spark faktisk har lært bort</label>
+      <div class="prof" style="max-height:170px;overflow-y:auto">
+        ${k.log.slice().reverse().map(e=>`<div style="margin-bottom:7px">
+          <strong>${esc(e.d)} · ${esc({matte:'Matte',lesing:'Lesing',quiz:'Quiz',lekse:'Lekse'}[e.m]||e.m)}</strong><br>${esc(e.t)}
+        </div>`).join('')}
+      </div>
+      <button class="btn ghost sm" id="clrLog" style="margin-top:7px">🧹 Tøm logg</button>
+    </div>` : `
+    <div class="note info">
+      <strong>📋 Undervisningslogg:</strong> etter hver økt skriver Spark en kort
+      oppsummering hit — hva dere jobbet med, hva som gikk bra, hva som var vanskelig.
+      Les den innimellom. En AI kan ta feil, og et barn på 6 fanger det ikke opp.
+    </div>`}
+
+    <div>
+      <label>Modell (avansert)</label>
+      <input type="text" id="fModel" value="${esc(model)}">
+    </div>
+
+    <button class="btn" id="saveBtn">💾 Lagre</button>
+    <div class="note" id="provNote"></div>
+  </div>`;
+
+  document.querySelectorAll('#bkTabs .tab').forEach(t=>t.onclick=()=>{
+    saveForm(); backup=t.dataset.b; backupKey=''; backupMdl=''; render();
+  });
+  document.querySelectorAll('#provTabs .tab').forEach(t=>t.onclick=()=>{
+    saveForm(); provider=t.dataset.p; model=PROVIDERS[provider].model; apiKey=''; render();
+  });
+  document.querySelectorAll('#kidRow .kid[data-i]').forEach(t=>t.onclick=()=>{
+    saveForm(); active=parseInt(t.dataset.i,10); saveKids(); render();
+  });
+  $('addKid').onclick=()=>{ saveForm(); kids.push(blankKid('')); active=kids.length-1; saveKids(); render(); };
+  if($('clrLog')) $('clrLog').onclick=()=>{
+    if(confirm('Tømme undervisningsloggen?')){ kid().log=[]; saveKids(); render(); }
+  };
+  if($('clrNotes')) $('clrNotes').onclick=()=>{
+    if(confirm('Nullstille alt Spark har lært om dette barnet?')){ kid().notes=[]; saveKids(); render(); }
+  };
+
+  $('provNote').className='note'+(provider==='claude'?' warn':'');
+  $('provNote').innerHTML = provider==='gemini'
+    ? `<strong>🆓 Gratis-nivå:</strong> Ingen betalingskort, ingen utløpsdato.
+       Rundt 1500 forespørsler per dag — langt mer enn lekser krever. Går kvoten tom,
+       stopper den til neste dag. Kan aldri koste noe.
+       <br><br><strong>Merk:</strong> Google kan bruke gratis-forespørsler til å trene
+       modellene sine. Greit for lekser — men unngå bilder med navn og adresse på.`
+    : `<strong>⚠️ Betalt:</strong> Sett et forbrukstak i Anthropic-konsollen
+       (f.eks. 5 USD/mnd) siden nøkkelen ligger på barnets telefon.`;
+
+  $('saveBtn').onclick=()=>{
+    saveForm();
+    if(!apiKey){ alert('Du må fylle inn API-nøkkelen først.'); return; }
+    localStorage.setItem(LS.prov,provider);
+    localStorage.setItem(LS.key,apiKey);
+    localStorage.setItem(LS.model,model);
+    saveKids();
+    view='start'; render();
+  };
+}
+
+function saveForm(){
+  if($('fKey'))   apiKey = $('fKey').value.trim();
+  if($('fModel')) model  = $('fModel').value.trim() || PROVIDERS[provider].model;
+  if($('fName'))  kid().name = $('fName').value.trim();
+  if($('fBkKey')) backupKey = $('fBkKey').value.trim();
+  if($('fBkMdl')) backupMdl = $('fBkMdl').value.trim();
+  localStorage.setItem('spark_backup', backup);
+  localStorage.setItem('spark_backup_key', backupKey);
+  localStorage.setItem('spark_backup_model', backupMdl);
+  if($('fAge')){
+    const a = parseInt($('fAge').value,10);
+    if(!isNaN(a) && a>=4 && a<=18) kid().age = a;
+  }
+  if($('fFun'))   kid().interests = $('fFun').value.trim();
+  saveKids();
+}
+
+function renderStart(){
+  const k = kid();
+  main.innerHTML = `
+  <div class="pad">
+    <div class="center">
+      <div class="big">${MODE_ICON[taskMode]}</div>
+      <div class="t1">Hei${k.name?' '+esc(k.name):''}!</div>
+      <div class="t2">${taskMode==='quiz'
+        ? 'Spark hjelper deg fram til svaret — og forklarer hvorfor.'
+        : 'Spark gir deg ikke svaret, men hjelper deg finne det selv.'}</div>
+    </div>
+
+    ${(()=>{ const s=loadSession();
+      return s&&s.chatMsgs&&s.chatMsgs.length>1
+      ? `<div class="note info" style="text-align:left">
+           <strong>💾 Du har en økt som ikke er ferdig.</strong><br>
+           ${esc((s.transcript||s.chatMsgs[0]?.text||'').slice(0,70))}...
+           <button class="btn sm" id="resumeBtn" style="margin-top:8px">▶️ Fortsett der dere slapp</button>
+         </div>` : ''; })()}
+
+    ${kids.length>1?`<div class="kids" id="kidPick">
+      ${kids.map((x,i)=>`<div class="kid ${i===active?'on':''}" data-i="${i}">${esc(x.name||'Barn '+(i+1))}</div>`).join('')}
+    </div>`:''}
+
+    <div>
+      <label>Hva slags oppgave?</label>
+      <div class="tabs" id="modeTabs" style="flex-wrap:wrap">
+        <div class="tab ${taskMode==='matte'?'on':''}" data-t="matte">🔢 Matte</div>
+        <div class="tab ${taskMode==='lesing'?'on':''}" data-t="lesing">📕 Lesing</div>
+        <div class="tab ${taskMode==='lekse'?'on':''}" data-t="lekse">📖 Annet</div>
+        <div class="tab ${taskMode==='quiz'?'on':''}" data-t="quiz">🧠 Quiz</div>
+      </div>
+      <div class="t2" style="margin-top:6px;font-size:11px">${MODE_HELP[taskMode]}</div>
+    </div>
+
+    <div class="tabs" id="inTabs">
+      <div class="tab ${inputMode==='camera'?'on':''}" data-m="camera">📷 Ta bilde</div>
+      <div class="tab ${inputMode==='text'?'on':''}" data-m="text">✏️ Skriv</div>
+    </div>
+
+    ${inputMode==='camera'?`
+      <div class="drop" id="drop">
+        ${hwPreview?`<img src="${hwPreview}" alt="oppgave">`:
+          `<div style="font-size:36px">📷</div>
+           <div style="font-weight:900;color:#7c5cbf;margin-top:7px">Trykk for å ta bilde</div>
+           <div class="t2" style="font-size:11px;margin-top:3px">Eller velg fra galleriet</div>`}
+      </div>
+      <input type="file" id="file" accept="image/*" capture="environment" style="display:none">
+      ${hwPreview?`<button class="btn ghost sm" id="clearImg">✕ Ta nytt bilde</button>`:''}
+    `:`
+      <div>
+        <label>✏️ Skriv oppgaven:</label>
+        <textarea id="hwT" rows="4" placeholder="${PLACEHOLD[taskMode]}">${esc(hwText)}</textarea>
+      </div>
+    `}
+
+    <button class="btn" id="go" ${(inputMode==='camera'? !hwPreview : hwText.trim().length<4)?'disabled':''}>
+      🚀 Sett i gang!
+    </button>
+
+    ${(kid().sessions&&kid().sessions.length)
+      ? `<button class="btn ghost sm" id="histBtn">📂 Tidligere økter (${kid().sessions.length})</button>`
+      : ''}
+  </div>`;
+
+  if($('resumeBtn')) $('resumeBtn').onclick=resumeSession;
+  if($('histBtn')) $('histBtn').onclick=()=>{ view='hist'; render(); };
+  document.querySelectorAll('#modeTabs .tab').forEach(t=>t.onclick=()=>{taskMode=t.dataset.t;render()});
+  document.querySelectorAll('#inTabs .tab').forEach(t=>t.onclick=()=>{inputMode=t.dataset.m;render()});
+  if($('kidPick')) document.querySelectorAll('#kidPick .kid').forEach(t=>t.onclick=()=>{
+    active=parseInt(t.dataset.i,10); saveKids(); render();
+  });
+  const drop=$('drop'), file=$('file');
+  if(drop) drop.onclick=()=>file.click();
+  if(file) file.onchange=async e=>{
+    const f=e.target.files[0]; if(!f) return;
+    hwPreview=await shrink(f); render();
+  };
+  if($('clearImg')) $('clearImg').onclick=()=>{hwPreview=null;render()};
+  if($('hwT')) $('hwT').oninput=e=>{hwText=e.target.value; $('go').disabled=hwText.trim().length<4};
+  $('go').onclick=start;
+}
+
+function renderChat(){
+  main.innerHTML=`<div class="chat" id="chatBox"></div>`;
+  const box=$('chatBox');
+  chatMsgs.forEach((m,i)=>{
+    const row=document.createElement('div');
+    row.className='row'+(m.role==='user'?' me':'');
+    if(m.role!=='user'){
+      const a=document.createElement('div');a.className='av';a.textContent='⚡';row.appendChild(a);
+    }
+    const b=document.createElement('div');
+    b.className='bub '+(m.sys?'sys':(m.role==='user'?'me':'them'));
+    b.textContent=m.text;
+    row.appendChild(b);
+    if(m.role!=='user'&&!m.sys&&voiceOn){
+      const s=document.createElement('button');
+      s.className='spk'+(speakingIdx===i?' on':'');
+      s.textContent=speakingIdx===i?'⏹':'🔊';
+      s.onclick=()=>speakingIdx===i?(stopSpeak(),render()):speak(m.text,i);
+      row.appendChild(s);
+    }
+    box.appendChild(row);
+  });
+  if(busy){
+    const row=document.createElement('div');row.className='row';
+    row.innerHTML=`<div class="av">⚡</div><div class="dots"><i></i><i></i><i></i></div>`;
+    box.appendChild(row);
+  }
+  renderQuick();
+  main.scrollTop=main.scrollHeight;
+}
+
+function renderQuick(){
+  const opts = taskMode==='quiz'
+    ? [['🤔 Jeg vet ikke','Jeg vet ikke helt...'],
+       ['💡 Gi meg et hint','Kan du gi meg et hint?'],
+       ['✅ Vis svaret','Jeg står fast — kan du vise meg svaret og forklare hvorfor?']]
+    : taskMode==='lesing'
+    ? [['🤔 Jeg vet ikke','Jeg vet ikke helt...'],
+       ['❓ Hva betyr ordet','Jeg skjønte ikke det ordet. Hva betyr det?'],
+       ['🔁 Forklar på nytt','Jeg skjønte ikke helt. Kan du forklare på en annen måte?']]
+    : [['🤔 Jeg vet ikke','Jeg vet ikke helt...'],
+       ['💡 Gi meg et hint','Kan du gi meg et hint?'],
+       ['🔁 Forklar på nytt','Jeg skjønte ikke helt. Kan du forklare på en annen måte?']];
+  quick.innerHTML = opts.map(([l,v])=>`<button class="qb" data-v="${esc(v)}">${l}</button>`).join('');
+  quick.querySelectorAll('.qb').forEach(b=>b.onclick=()=>{
+    if(busy) return;
+    $('msg').value=b.dataset.v; send();
+  });
+}
+
+/* ================= FLYT ================= */
+async function start(){
+  if(inputMode==='camera'&&hwPreview){
+    history=[{role:'user',content:[
+      {type:'image',source:{type:'base64',media_type:'image/jpeg',data:hwPreview.split(',')[1]}},
+      {type:'text',text:OPENERS[taskMode]}
+    ]}];
+    chatMsgs=[{role:'user',text:'📸 Bilde sendt!',sys:true}];
+  } else {
+    history=[{role:'user',content:`${OPENERS[taskMode]}\n\n${hwText}`}];
+    chatMsgs=[{role:'user',text:'📝 '+hwText.slice(0,70)+(hwText.length>70?'...':''),sys:true}];
+  }
+  readOnly=false; transcript=''; usingBackup=false; backupAnnounced=false;
+  view='chat'; busy=true; render();
+  await turn();
+}
+
+async function send(){
+  const t=$('msg').value.trim();
+  if(!t||busy) return;
+  stopSpeak();
+  $('msg').value=''; $('msg').style.height='auto';
+  chatMsgs.push({role:'user',text:t});
+  history.push({role:'user',content:t});
+  busy=true; saveSession(); render();
+  await turn();
+}
+
+async function turn(retried){
+  try{
+    const raw = await callAI(payload());
+    history.push({role:'assistant',content:raw});
+    const shown = harvest(raw);
+    if(usingBackup && !backupAnnounced){
+      backupAnnounced = true;
+      chatMsgs.push({role:'assistant',
+        text:'🛟 Gemini er tom for i dag, så jeg fortsetter med reserven. Jeg husker oppgaven!',
+        sys:true});
+    }
+    chatMsgs.push({role:'assistant',text:shown});
+    busy=false; saveSession(); render();
+    speak(shown, chatMsgs.length-1);
+  }catch(err){
+    let m = err.message||'Ukjent feil';
+
+    // minutt-kvote: vent litt og prøv en gang til av seg selv
+    const perMinute = /per minute|RATE_LIMIT|rate limit/i.test(m) ||
+                      (/quota|RESOURCE_EXHAUSTED|429/i.test(m) && !/per day|daily/i.test(m));
+    if(perMinute && !retried){
+      chatMsgs.push({role:'assistant',text:'⏳ Litt for kjapt for gratis-kvoten. Jeg venter et halvt minutt og prøver igjen...',sys:true});
+      render();
+      await new Promise(r=>setTimeout(r,30000));
+      chatMsgs.pop();
+      return turn(true);
+    }
+
+    busy=false;
+    if(/per day|daily limit|RESOURCE_EXHAUSTED/i.test(m))
+      m = 'Dagens gratis-kvote er brukt opp. Økten er lagret — dere kan fortsette i morgen. 😊';
+    else if(/quota|429|rate/i.test(m))
+      m = 'For mange spørsmål på kort tid. Vent et minutt og prøv igjen.';
+    else if(/API key|API_KEY_INVALID|401|403|PERMISSION/i.test(m))
+      m = 'API-nøkkelen ser ut til å være feil. Sjekk den under ⚙️.';
+    else if(RETIRED.test(m))
+      m = 'Modellen finnes ikke lenger. Prøv å skrive «' + GEMINI_CHAIN[0] +
+          '» i Modell-feltet under ⚙️.';
+    else if(/Failed to fetch|NetworkError/i.test(m))
+      m = 'Fikk ikke kontakt med nettet. Sjekk forbindelsen og prøv igjen.';
+    chatMsgs.push({role:'assistant',text:'Oi! '+m});
+    saveSession(); render();
+  }
+}
+
+/* ================= KNAPPER ================= */
+$('sendBtn').onclick=send;
+$('msg').addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send();}
+});
+$('msg').addEventListener('input',e=>{
+  e.target.style.height='auto';
+  e.target.style.height=Math.min(e.target.scrollHeight,96)+'px';
+});
+$('voiceBtn').onclick=()=>{
+  voiceOn=!voiceOn; localStorage.setItem(LS.voice,voiceOn?'1':'0');
+  if(!voiceOn) stopSpeak(); render();
+};
+$('backBtn').onclick=()=>{                       // tilbake, økten beholdes
+  stopSpeak(); if(!readOnly) saveSession();
+  readOnly=false; view='start'; render();
+};
+$('newBtn').onclick=()=>{                        // ny oppgave, den gamle arkiveres
+  stopSpeak();
+  if(!readOnly && chatMsgs.length>1){
+    if(!confirm('Starte på en ny oppgave? Denne økten lagres under «Tidligere økter».')) return;
+    archiveSession();
+  }
+  readOnly=false; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
+  view='start'; render();
+};
+$('cogBtn').onclick=()=>{stopSpeak();view='setup';render()};
+
+/* Androids tilbake-knapp skal ikke lukke appen midt i en oppgave */
+history_guard();
+function history_guard(){
+  window.history.pushState({v:'spark'},'');
+  window.addEventListener('popstate',()=>{
+    window.history.pushState({v:'spark'},'');
+    if(view==='chat'){ stopSpeak(); if(!readOnly) saveSession(); readOnly=false; view='start'; render(); }
+    else if(view==='hist'||view==='setup'){ view='start'; render(); }
+  });
+}
+
+/* PWA: registrer service worker hvis appen kjøres fra en ekte nettadresse */
+if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
+
+render();
+</script>
+</body>
+</html>
