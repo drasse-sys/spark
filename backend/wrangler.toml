@@ -6,7 +6,7 @@ workers_dev = true
 # Endre denne til den faktiske adressen der Spark PWA ligger.
 # Flere adresser kan skilles med komma, f.eks. produksjon + lokal test.
 [vars]
-ALLOWED_ORIGINS = "https://YOUR-GITHUB-USERNAME.github.io"
+ALLOWED_ORIGINS = "https://drasse-sys.github.io"
 BACKUP_PROVIDER = "none"
 OPENROUTER_MODEL = "openrouter/free"
 GROQ_MODEL = "openai/gpt-oss-120b"
@@ -26,4 +26,18 @@ name = "PAIR_LIMITER"
 namespace_id = "1002"
   [ratelimits.simple]
   limit = 6
+  period = 60
+
+[[ratelimits]]
+name = "CHAT_GLOBAL_LIMITER"
+namespace_id = "1003"
+  [ratelimits.simple]
+  limit = 40
+  period = 60
+
+[[ratelimits]]
+name = "PAIR_GLOBAL_LIMITER"
+namespace_id = "1004"
+  [ratelimits.simple]
+  limit = 20
   period = 60

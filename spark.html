@@ -2,7 +2,7 @@
 <html lang="no">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <meta name="theme-color" content="#FF6B6B">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -24,7 +24,7 @@ display:flex;align-items:center;gap:8px;flex-shrink:0}
 @keyframes sparkle{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
 h1{font-size:18px;font-weight:900;color:#fff;margin:0;letter-spacing:-.4px;line-height:1.1}
 .sub{font-size:10.5px;color:rgba(255,255,255,.88);font-weight:700}
-.hbtn{background:rgba(255,255,255,.28);border:none;border-radius:10px;padding:6px 8px;
+.hbtn{min-width:44px;min-height:44px;background:rgba(255,255,255,.28);border:none;border-radius:10px;padding:6px 8px;
 color:#fff;font-weight:800;cursor:pointer;font-size:15px;font-family:inherit}
 .hbtn.off{background:rgba(0,0,0,.22)}
 .hbtn.small{font-size:11px;padding:6px 9px}
@@ -53,11 +53,11 @@ color:#8B6914;line-height:1.6;font-weight:600}
 .note.info{background:#EEF4FF;color:#2A4C8B}
 .note.ok{background:#ECFDF3;color:#176B3A}
 .tabs{display:flex;gap:6px;background:#f3f0ff;border-radius:14px;padding:4px}
-.tab{flex:1;text-align:center;padding:10px 6px;border-radius:11px;font-weight:800;
+.tab{border:0;font-family:inherit;flex:1;text-align:center;padding:10px 6px;border-radius:11px;font-weight:800;
 font-size:13px;color:#999;cursor:pointer;transition:all .18s}
 .tab.on{background:#fff;color:#7c5cbf;box-shadow:0 2px 8px rgba(0,0,0,.1)}
 .kids{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
-.kid{padding:7px 13px;border-radius:20px;background:#f3f0ff;color:#7c5cbf;
+.kid{font-family:inherit;padding:7px 13px;border-radius:20px;background:#f3f0ff;color:#7c5cbf;
 font-weight:800;font-size:13px;cursor:pointer;border:2px solid transparent}
 .kid.on{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff}
 .kid.add{background:#fff;border:2px dashed #c0b4f0;color:#a78bfa}
@@ -124,16 +124,17 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
       <div class="sub" id="who">Lekseassistenten din 🌟</div>
     </div>
     <div class="stars">⭐ <span id="starCount">0</span></div>
-    <button class="hbtn" id="voiceBtn">🔊</button>
-    <button class="hbtn small hide" id="backBtn">←</button>
-    <button class="hbtn small hide" id="newBtn">🔄</button>
-    <button class="hbtn small" id="cogBtn">⚙️</button>
+    <button class="hbtn" id="voiceBtn" aria-label="Slå tale av eller på">🔊</button>
+    <button class="hbtn small hide" id="backBtn" aria-label="Tilbake til oppgaver">←</button>
+    <button class="hbtn small hide" id="newBtn" aria-label="Ny oppgave">🔄</button>
+    <button class="hbtn small" id="cogBtn" aria-label="Innstillinger">⚙️</button>
   </header>
+  <div id="status" class="note warn hide" role="status" aria-live="polite"></div>
   <main id="main"></main>
   <div class="quick hide" id="quick"></div>
   <div class="donebar hide" id="doneBar"><button class="donebtn" id="doneBtn">✅ Ferdig med leksa</button></div>
   <footer id="foot" class="hide">
-    <textarea id="msg" rows="1" placeholder="Skriv eller si svaret ditt... ✏️"></textarea>
+    <textarea id="msg" aria-label="Svaret ditt" rows="1" placeholder="Skriv eller si svaret ditt... ✏️"></textarea>
     <button class="mic hide" id="micBtn" aria-label="Snakk inn svar">🎙️</button>
     <button class="send" id="sendBtn" aria-label="Send svar">🚀</button>
   </footer>
@@ -141,8 +142,8 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
 
 <script>
 /* ================= SPARK v5.3 =================
-   Selvstendig lekseassistent. Ingen server.
-   Nøkkel + profiler lagres kun lokalt (localStorage).
+   Privat Worker beskytter leverandørnøkler.
+   Profiler, økter og enhetstoken lagres lokalt på denne telefonen.
 ============================================== */
 
 const LS = { kids:'spark_kids', active:'spark_active', voice:'spark_voice',
@@ -150,17 +151,33 @@ const LS = { kids:'spark_kids', active:'spark_active', voice:'spark_voice',
              server:'spark_server_url', device:'spark_device_token', tokenServer:'spark_device_server' };
 
 /* Spark v5.3 bruker en liten privat backend. Leverandør-nøkler skal aldri ligge på telefonen. */
-const DEFAULT_SERVER_URL = ''; // Kan fylles inn med Worker-adressen etter utrulling.
+const DEFAULT_SERVER_URL = 'https://spark-family-api.drasse.workers.dev';
+
+let storageWarning = '', voiceNotice = '';
+function showStatus(){
+  const el=document.getElementById('status');
+  el.textContent=[storageWarning,voiceNotice].filter(Boolean).join(' ');
+  el.classList.toggle('hide',!el.textContent);
+}
+const store = {
+  getItem(key){ try{return localStorage.getItem(key);}catch{ storageWarning='Lokal lagring er utilgjengelig. Ikke lukk appen før økten er lagret.'; showStatus(); return null;} },
+  setItem(key,value){ try{localStorage.setItem(key,value);return true;}catch{ storageWarning='Kunne ikke lagre på denne telefonen. Frigjør plass og prøv igjen. Behold appen åpen.'; showStatus();return false;} },
+  removeItem(key){ try{localStorage.removeItem(key);return true;}catch{ storageWarning='Kunne ikke oppdatere lokal lagring. Behold appen åpen og prøv igjen.';showStatus();return false;} }
+};
 
 // Migrering fra v5.1: slett eventuelle gamle leverandør-nøkler fra nettleseren.
 ['spark_key','spark_backup_key','spark_backup_model','spark_backup','spark_prov','spark_model']
-  .forEach(k=>localStorage.removeItem(k));
+  .forEach(k=>store.removeItem(k));
 
-function normalizeServer(v){ return (v||'').trim().replace(/\/+$/,''); }
-let serverUrl = normalizeServer(localStorage.getItem(LS.server) || DEFAULT_SERVER_URL);
-let deviceToken = localStorage.getItem(LS.device) || '';
-let tokenServer = normalizeServer(localStorage.getItem(LS.tokenServer) || '');
-let voiceOn  = localStorage.getItem(LS.voice) !== '0';
+function normalizeServer(v){ return String(v||'').trim().replace(/\/+$/,''); }
+function validServer(value){
+  try{ const u=new URL(value); return !u.username && !u.password && !u.search && !u.hash &&
+    u.pathname==='/' && (u.protocol==='https:' || (u.protocol==='http:' && ['localhost','127.0.0.1','[::1]'].includes(u.hostname))); }catch{return false;}
+}
+let serverUrl = normalizeServer(store.getItem(LS.server) || DEFAULT_SERVER_URL);
+let deviceToken = store.getItem(LS.device) || '';
+let tokenServer = normalizeServer(store.getItem(LS.tokenServer) || '');
+let voiceOn  = store.getItem(LS.voice) !== '0';
 function paired(){ return !!(serverUrl && deviceToken && tokenServer===serverUrl); }
 
 /* ---- barneprofiler ---- */
@@ -168,16 +185,29 @@ function blankKid(name){
   return { name:name||'', age:8, interests:'', stars:0, notes:[], log:[], sessions:[], level:'' };
 }
 let kids = [];
-try { kids = JSON.parse(localStorage.getItem(LS.kids) || '[]'); } catch(e){ kids=[]; }
-if(!kids.length) kids = [blankKid('')];
-kids.forEach(k=>{ if(!k.age) k.age=8; if(!k.log) k.log=[]; if(!k.notes) k.notes=[];
-                  if(!k.sessions) k.sessions=[]; });
-let active = parseInt(localStorage.getItem(LS.active) || '0', 10);
-if(active >= kids.length) active = 0;
+try { kids = JSON.parse(store.getItem(LS.kids) || '[]'); } catch(e){ kids=[]; }
+if(!Array.isArray(kids)) kids=[];
+// Keep profile positions stable: session keys are indexed by child.
+kids=kids.map(value=>{
+  const k=value && typeof value==='object' && !Array.isArray(value)?value:{};
+  return {
+  ...blankKid(''), ...k,
+  name:typeof k.name==='string'?k.name.slice(0,40):'',
+  age:Number.isInteger(k.age)?Math.max(4,Math.min(16,k.age)):8,
+  interests:typeof k.interests==='string'?k.interests.slice(0,120):'',
+  stars:Number.isFinite(k.stars)?Math.max(0,k.stars):0,
+  notes:Array.isArray(k.notes)?k.notes.filter(n=>typeof n==='string').map(n=>n.slice(0,90)).slice(-12):[],
+  log:Array.isArray(k.log)?k.log.filter(e=>e && ['d','m','t'].every(x=>typeof e[x]==='string')).slice(-20):[],
+  sessions:Array.isArray(k.sessions)?k.sessions.filter(e=>e && typeof e.d==='string' && typeof e.m==='string' && typeof e.t==='string' && validChat(e.msgs)).slice(-8):[]
+  };
+});
+if(!kids.length) kids=[blankKid('')];
+let active = Number(store.getItem(LS.active) || '0');
+if(!Number.isInteger(active) || active<0 || active>=kids.length) active=0;
 const kid = () => kids[active];
 function saveKids(){
-  localStorage.setItem(LS.kids, JSON.stringify(kids));
-  localStorage.setItem(LS.active, String(active));
+  const saved=store.setItem(LS.kids, JSON.stringify(kids));
+  return store.setItem(LS.active, String(active)) && saved;
 }
 
 /* ---- tilstand ---- */
@@ -210,44 +240,60 @@ let chatMsgs = [], history = [], transcript = '';
 let busy = false, speakingIdx = null, readOnly = false, backupAnnounced = false;
 let recognition = null, listening = false;
 let startNotice = '';
+let pendingFinal = null, photoLoad = 0, currentSessionId = '';
+const newSessionId = () => Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
+function chooseChild(index){
+  if(index===active) return;
+  stopSpeak(); stopMic(); photoLoad++; hwPreview=null; hwText=''; $('msg').value='';
+  chatMsgs=[]; history=[]; transcript=''; pendingFinal=null; readOnly=false; currentSessionId='';
+  active=index; saveKids();
+}
 
 const $ = id => document.getElementById(id);
 const main = $('main'), foot = $('foot'), quick = $('quick'), doneBar = $('doneBar');
-const esc = s => (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const esc = s => String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 /* ================= SYSTEMPROMPT ================= */
 
 /* ================= TALE ================= */
 const synth = window.speechSynthesis;
 let voiceList = [];
-let voiceName = localStorage.getItem(LS.voiceName) || '';
+let speechGeneration = 0;
+let voiceName = store.getItem(LS.voiceName) || '';
 
-function refreshVoices(){
-  voiceList = synth ? synth.getVoices() : [];
-  if(voiceName && !voiceList.some(v=>v.name===voiceName)) voiceName='';
+function voiceId(v){ return v.voiceURI || v.name; }
+function norwegianRank(v){
+  const lang=String(v.lang||'').replace(/_/g,'-').toLowerCase();
+  const preferred=['nb-no','no-no','nb','no','nn-no'];
+  const rank=preferred.indexOf(lang);
+  return rank>=0?rank:(/^(nb|no)-/.test(lang)?5:Infinity);
 }
+function refreshVoices(){ voiceList = synth ? synth.getVoices() : []; }
 function norwegianVoices(){
   refreshVoices();
-  return voiceList.filter(v=>/^(nb|nn|no)-/i.test(v.lang) || /norsk|norwegian/i.test(v.name));
+  return voiceList.filter(v=>Number.isFinite(norwegianRank(v)));
 }
 function pickVoice(){
   refreshVoices();
-  if(voiceName){
-    const chosen=voiceList.find(v=>v.name===voiceName);
-    if(chosen) return chosen;
-  }
-  const ranked = voiceList.slice().sort((a,b)=>{
-    const score=v=>(/^nb-NO$/i.test(v.lang)?100:0)+(/^(nb|no)-/i.test(v.lang)?60:0)+
-      (/^nn-NO$/i.test(v.lang)?45:0)+(/^da-DK$/i.test(v.lang)?30:0)+(/^sv-SE$/i.test(v.lang)?25:0)+(v.default?20:0)+(v.localService?5:0);
-    return score(b)-score(a);
-  });
-  return ranked[0] || null;
+  // Preserve a saved manual choice while asynchronous lists are empty.
+  const manual=voiceName && voiceList.find(v=>voiceId(v)===voiceName || v.name===voiceName);
+  if(manual) return manual;
+  return norwegianVoices().slice().sort((a,b)=>norwegianRank(a)-norwegianRank(b) ||
+    Number(b.default)-Number(a.default) || Number(b.localService)-Number(a.localService))[0] || null;
+}
+function voiceOptions(){
+  const voices=norwegianVoices();
+  const manual=voices.find(v=>voiceId(v)===voiceName || v.name===voiceName);
+  return `<option value="" ${!voiceName?'selected':''}>Automatisk — beste norske stemme på denne enheten</option>`+
+    (voiceName&&!manual?`<option value="${esc(voiceName)}" selected>Valgt stemme er ikke tilgjengelig ennå</option>`:'')+
+    voices.map(v=>`<option value="${esc(voiceId(v))}" ${v===manual?'selected':''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('');
 }
 if(synth){
   refreshVoices();
-  if('onvoiceschanged' in synth) synth.addEventListener('voiceschanged', ()=>{
+  synth.addEventListener('voiceschanged', ()=>{
     refreshVoices();
-    if(view==='setup') render();
+    if($('fVoice')) $('fVoice').innerHTML=voiceOptions();
+    if(pickVoice()){ voiceNotice=''; showStatus(); }
   });
 }
 function speechText(text){
@@ -269,34 +315,41 @@ function speechText(text){
     .replace(/(\d)\s*l\b/gi,'$1 liter')
     .replace(/\s+/g,' ').trim();
 }
-function speak(text, idx){
-  if(!synth || !voiceOn) return;
-  synth.cancel();
+function speak(text, idx, force=false){
+  if(!voiceOn && !force) return;
+  if(!synth){voiceNotice='Denne nettleseren støtter ikke opplesing. Prøv en nettleser med norsk tale.';showStatus();return;}
+  stopSpeak();
+  const generation=speechGeneration;
   const clean = speechText(text);
   if(!clean) return;
   const u = new SpeechSynthesisUtterance(clean);
-  const v = pickVoice(); if(v) u.voice = v;
-  u.lang = v?.lang || 'nb-NO';
+  const v = pickVoice();
+  if(!v){ voiceNotice='Ingen norsk stemme er tilgjengelig ennå. Velg eller installer en norsk stemme i telefonens taleinnstillinger, og prøv igjen under ⚙️ Stemme.'; showStatus(); return; }
+  voiceNotice=''; showStatus();
+  u.voice = v; u.lang = v.lang;
   u.rate=.96; u.pitch=1.0; u.volume=1;
-  u.onstart=()=>{speakingIdx=idx;render()};
-  u.onend=u.onerror=()=>{speakingIdx=null;render()};
+  u.onstart=()=>{if(generation!==speechGeneration)return;speakingIdx=idx;if(view==='chat') render()};
+  u.onend=u.onerror=()=>{if(generation!==speechGeneration)return;speakingIdx=null;if(view==='chat') render()};
   synth.speak(u);
 }
-function stopSpeak(){ if(synth) synth.cancel(); speakingIdx=null; }
-function stopMic(){ if(recognition){ try{recognition.abort();}catch(e){} } recognition=null; listening=false; }
+function stopSpeak(){ speechGeneration++; if(synth) synth.cancel(); speakingIdx=null; }
+function stopMic(){ const old=recognition; recognition=null; listening=false; if(old){ old.onresult=old.onend=old.onerror=old.onstart=null; try{old.abort();}catch(e){} } }
 
 /* ================= BILDE ================= */
 function shrink(file){
-  return new Promise(res=>{
-    const r=new FileReader();
+  return new Promise((res,reject)=>{
+    const fail=()=>reject(new Error('Kunne ikke åpne bildet. Prøv et annet bilde i JPEG- eller PNG-format.'));
+    const r=new FileReader(); r.onerror=r.onabort=fail;
     r.onload=e=>{
-      const img=new Image();
+      const img=new Image(); img.onerror=fail;
       img.onload=()=>{
+        try{
         const max=1100; let {width:w,height:h}=img;
         if(w>max||h>max){const s=max/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s);}
         const c=document.createElement('canvas');c.width=w;c.height=h;
         c.getContext('2d').drawImage(img,0,0,w,h);
         res(c.toDataURL('image/jpeg',.72));
+        }catch{fail();}
       };
       img.src=e.target.result;
     };
@@ -319,47 +372,60 @@ function payload(){
 }
 
 /* ====== lagring av økt, så ingenting går tapt ved feiltrykk ====== */
+function validChat(msgs){ return Array.isArray(msgs) && msgs.length>0 && msgs.every(m=>m && ['user','assistant'].includes(m.role) && typeof m.text==='string'); }
+function validHistory(msgs){ return Array.isArray(msgs) && msgs.length>0 && msgs.every(m=>m && ['user','assistant'].includes(m.role) &&
+  (typeof m.content==='string' || (Array.isArray(m.content) && m.content.length>0 && m.content.every(p=>p &&
+    ((p.type==='text' && typeof p.text==='string') || (p.type==='image' && typeof p.source?.data==='string' && typeof p.source?.media_type==='string')))))); }
 function sessionKey(i=active){ return LS.sess + '_' + i; }
 function migrateLegacySession(){
   try{
-    const old = localStorage.getItem(LS.sess);
+    const old = store.getItem(LS.sess);
     if(!old) return;
     const s = JSON.parse(old);
     const idx = Number.isInteger(s?.kid) ? s.kid : active;
-    if(!localStorage.getItem(sessionKey(idx))) localStorage.setItem(sessionKey(idx), old);
-    localStorage.removeItem(LS.sess);
+    if(!store.getItem(sessionKey(idx)) && !store.setItem(sessionKey(idx), old)) return;
+    store.removeItem(LS.sess);
   }catch(e){}
 }
 migrateLegacySession();
 function saveSession(){
   try{
-    localStorage.setItem(sessionKey(), JSON.stringify({
-      kid:active, mode:taskMode, transcript,
-      chatMsgs, history:slimHistory(), ts:Date.now()
+    if(!currentSessionId) currentSessionId=newSessionId();
+    return store.setItem(sessionKey(), JSON.stringify({
+      id:currentSessionId, kid:active, mode:taskMode, transcript,
+      chatMsgs, history:transcript?slimHistory():history, pendingFinal, usingBackup, ts:Date.now()
     }));
-  }catch(e){ /* full disk / privat modus - ikke kritisk */ }
+  }catch(e){ storageWarning='Kunne ikke lagre økten. Behold appen åpen og prøv igjen.';showStatus();return false; }
 }
 function loadSession(i=active){
   try{
-    const s = JSON.parse(localStorage.getItem(sessionKey(i))||'null');
-    if(!s || !s.chatMsgs || !s.chatMsgs.length) return null;
+    const s = JSON.parse(store.getItem(sessionKey(i))||'null');
+    if(!s || s.kid!==i || !Object.hasOwn(MODE_NAME,s.mode) || !validChat(s.chatMsgs) || !validHistory(s.history) || typeof s.transcript!=='string') return null;
+    if(s.id && kids[i]?.sessions.some(archived=>archived.id===s.id)) return null;
     return s;
   }catch(e){ return null; }
 }
 function resumeSession(){
   const s = loadSession(); if(!s) return;
   startNotice='';
-  active = Math.min(s.kid||0, kids.length-1);
+  readOnly=false; stopSpeak(); stopMic();
   taskMode = s.mode || 'lekse';
   transcript = s.transcript || '';
   chatMsgs = s.chatMsgs; history = s.history;
+  currentSessionId=typeof s.id==='string'?s.id:newSessionId();
+  pendingFinal=typeof s.pendingFinal?.summary==='string'?s.pendingFinal:null;
+  usingBackup=!!s.usingBackup; backupAnnounced=usingBackup;
+  $('msg').value='';
   view='chat'; render();
 }
 function archiveSession(summary=''){
-  if(!chatMsgs.length) return;
+  if(!chatMsgs.length) return true;
   const k = kid();
+  const previous=k.sessions;
   if(!k.sessions) k.sessions = [];
+  k.sessions=k.sessions.slice();
   k.sessions.push({
+    id:currentSessionId || newSessionId(),
     d:new Date().toLocaleDateString('no-NO'),
     m:taskMode,
     t:(transcript||chatMsgs[0]?.text||'Økt').slice(0,60),
@@ -367,8 +433,10 @@ function archiveSession(summary=''){
     msgs:chatMsgs.slice(-40)
   });
   if(k.sessions.length > 8) k.sessions.shift();
-  saveKids();
-  localStorage.removeItem(sessionKey());
+  if(!saveKids()){ k.sessions=previous; return false; }
+  if(store.removeItem(sessionKey())) storageWarning='';
+  showStatus();
+  return true;
 }
 
 /* ================= API VIA PRIVAT SPARK-SERVER ================= */
@@ -378,7 +446,16 @@ function errText(err){ return ((err&&err.message)||'') + ' ' + ((err&&err.detail
 function isDailyQuota(err){ return DAILY.test(errText(err)); }
 function isMinuteQuota(err){
   const t=errText(err);
-  return MINUTE.test(t) || (/RESOURCE_EXHAUSTED|429/i.test(t) && !isDailyQuota(err));
+  return !isDailyQuota(err) && (err?.kind==='minute_quota' || err?.status===429 || MINUTE.test(t) || /RESOURCE_EXHAUSTED|429/i.test(t));
+}
+async function fetchServer(path, options){
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),path==='/pair'?20000:150000);
+  try{return await fetch(endpoint(path),{...options,signal:controller.signal});}
+  catch(err){
+    if(controller.signal.aborted) throw new Error('Spark-serveren brukte for lang tid. Vent litt og prøv igjen.');
+    throw err;
+  }finally{clearTimeout(timer);}
 }
 function endpoint(path){
   if(!serverUrl) throw new Error('Spark-serveren er ikke satt opp. Åpne ⚙️ Innstillinger.');
@@ -386,43 +463,43 @@ function endpoint(path){
 }
 async function pairDevice(code){
   serverUrl=normalizeServer(serverUrl);
-  if(!serverUrl) throw new Error('Skriv inn adressen til Spark-serveren først.');
+  if(!validServer(serverUrl)) throw new Error('Serveradressen må være en HTTPS-adresse uten sti. Lokal testing kan bruke http://localhost.');
   if(!code || code.trim().length<6) throw new Error('Familiekoden mangler eller er for kort.');
-  const r=await fetch(endpoint('/pair'),{
+  const r=await fetchServer('/pair',{
     method:'POST', headers:{'content-type':'application/json'},
     body:JSON.stringify({code:code.trim(), deviceName:'Spark-enhet'})
   });
   const d=await r.json().catch(()=>({}));
   if(!r.ok || !d.token) throw new Error(d.error||('Kunne ikke koble enheten ('+r.status+').'));
   deviceToken=d.token; tokenServer=serverUrl;
-  localStorage.setItem(LS.server,serverUrl);
-  localStorage.setItem(LS.device,deviceToken);
-  localStorage.setItem(LS.tokenServer,tokenServer);
+  store.setItem(LS.server,serverUrl);
+  store.setItem(LS.device,deviceToken);
+  store.setItem(LS.tokenServer,tokenServer);
   return true;
 }
 function unpairDevice(){
   deviceToken=''; tokenServer='';
-  localStorage.removeItem(LS.device); localStorage.removeItem(LS.tokenServer);
+  store.removeItem(LS.device); store.removeItem(LS.tokenServer);
 }
 
 let usingBackup = false;
 async function callAI(messages){
   if(!paired()) throw new Error('Denne enheten er ikke koblet til Spark-serveren. Åpne ⚙️ Innstillinger.');
   const k=kid();
-  const r=await fetch(endpoint('/chat'),{
+  const r=await fetchServer('/chat',{
     method:'POST',
     headers:{'content-type':'application/json','authorization':'Bearer '+deviceToken},
     body:JSON.stringify({mode:taskMode,age:k.age,name:k.name||'',interests:k.interests||'',notes:(k.notes||[]).slice(-8),sessionState:'',messages,transcript:transcript||''})
   });
   const d=await r.json().catch(()=>({}));
-  if(r.status===401){
+  if(r.status===401 && !d.kind){
     unpairDevice();
     const e=new Error('Koblingen til Spark-serveren er utløpt. En forelder må koble denne enheten på nytt i ⚙️.');
     e.status=401; throw e;
   }
-  if(!r.ok || !d.text){
+  if(!r.ok || typeof d.text!=='string' || !d.text.trim()){
     const e=new Error(d.error||('Spark-serverfeil ('+r.status+')'));
-    e.status=r.status; e.details=(d.kind||'')+' '+(d.details||''); throw e;
+    e.status=r.status; e.kind=d.kind||''; e.details=(d.kind||'')+' '+(d.details||''); throw e;
   }
   usingBackup = d.provider && d.provider!=='gemini';
   return d.text.trim();
@@ -458,7 +535,7 @@ function harvest(raw){
   // avskrift av oppgaven -> lar oss droppe bildet fra videre kall
   const ore = /\[\[OPPGAVE:\s*([\s\S]+?)\]\]/i;
   const om = raw.match(ore);
-  if(om && !transcript) transcript = om[1].trim().slice(0,3000);
+  if(om && !transcript) transcript = om[1].trim().slice(0,20000);
 
   // foreldre-logg
   const lre = /\[\[LOGG:\s*([^\]]+)\]\]/gi;
@@ -504,6 +581,11 @@ function render(){
   quick.classList.toggle('hide', view!=='chat' || readOnly);
   doneBar.classList.toggle('hide', view!=='chat' || readOnly);
   $('doneBtn').disabled = busy || chatMsgs.length < 2;
+  $('doneBtn').textContent=pendingFinal?'💾 Prøv å lagre ferdig økt igjen':'✅ Ferdig med leksa';
+  ['backBtn','newBtn','cogBtn'].forEach(id=>$(id).disabled=busy);
+  $('sendBtn').disabled=busy || readOnly || !!pendingFinal;
+  $('micBtn').disabled=busy || !!pendingFinal;
+  showStatus();
   if(view==='setup') return renderSetup();
   if(view==='start') return renderStart();
   if(view==='chat')  return renderChat();
@@ -521,17 +603,17 @@ function renderHist(){
       <div class="t2">${esc(k.name||'Barnet')} — de siste ${list.length} øktene</div>
     </div>
     ${list.map((s,i)=>`
-      <div class="prof" style="cursor:pointer" data-s="${list.length-1-i}">
+      <button type="button" class="prof" style="cursor:pointer;text-align:left" data-s="${list.length-1-i}">
         <strong>${esc(s.d)} · ${esc(MODE_NAME[s.m]||s.m)}</strong><br>
         ${esc(s.t)}<br>
         ${s.summary?`<span style="display:block;margin-top:5px">📝 ${esc(s.summary)}</span>`:''}
         <span style="opacity:.6">${s.msgs.length} meldinger — trykk for å lese</span>
-      </div>`).join('') || '<div class="note">Ingen lagrede økter ennå.</div>'}
+      </button>`).join('') || '<div class="note">Ingen lagrede økter ennå.</div>'}
     <button class="btn ghost" id="backHist">← Tilbake</button>
   </div>`;
   main.querySelectorAll('[data-s]').forEach(el=>el.onclick=()=>{
     const s = k.sessions[parseInt(el.dataset.s,10)];
-    chatMsgs = s.msgs.slice(); history=[]; transcript='';
+    chatMsgs = s.msgs.slice(); history=[]; transcript=''; taskMode=s.m; pendingFinal=null; $('msg').value='';
     view='chat'; readOnly=true; render();
   });
   $('backHist').onclick=()=>{ view='start'; render(); };
@@ -549,15 +631,17 @@ function renderSetup(){
     </div>
 
     <div>
-      <label>🔐 Privat Spark-server</label>
-      <input type="url" id="fServer" placeholder="https://spark-api....workers.dev" value="${esc(serverUrl)}">
+      <label>🔐 Koble til Spark</label>
+      <details><summary>Avansert: serveradresse</summary>
+      <label for="fServer">Privat Spark-server</label>
+      <input type="url" id="fServer" value="${esc(serverUrl)}" autocomplete="url"></details>
       <div class="note ${isPaired?'ok':'info'}" style="margin-top:7px">
         ${isPaired
           ? '<strong>✅ Denne enheten er koblet.</strong> Gemini/OpenRouter/Groq-nøkler ligger bare på serveren — ikke på telefonen.'
-          : '<strong>Ingen API-nøkkel på telefonen.</strong> Skriv inn serveradressen og familiekoden én gang for å koble denne enheten.'}
+          : '<strong>Ingen API-nøkkel på telefonen.</strong> Skriv inn familiekoden én gang for å koble denne enheten.'}
       </div>
       ${!isPaired?`
-        <input type="password" id="fFamily" autocomplete="one-time-code" placeholder="Familiekode" style="margin-top:7px">
+        <label for="fFamily">Familiekode</label><input type="password" id="fFamily" autocomplete="one-time-code" placeholder="Familiekode" style="margin-top:7px">
         <button class="btn sm" id="pairBtn" style="margin-top:7px">🔗 Koble denne enheten</button>
       `:`<button class="btn ghost sm" id="unpairBtn" style="margin-top:7px">🔓 Koble fra denne enheten</button>`}
     </div>
@@ -565,8 +649,8 @@ function renderSetup(){
     <div>
       <label>Barn</label>
       <div class="kids" id="kidRow">
-        ${kids.map((x,i)=>`<div class="kid ${i===active?'on':''}" data-i="${i}">${esc(x.name||'Barn '+(i+1))}</div>`).join('')}
-        <div class="kid add" id="addKid">+ Legg til</div>
+        ${kids.map((x,i)=>`<button type="button" class="kid ${i===active?'on':''}" data-i="${i}">${esc(x.name||'Barn '+(i+1))}</button>`).join('')}
+        <button type="button" class="kid add" id="addKid">+ Legg til</button>
       </div>
     </div>
 
@@ -604,10 +688,7 @@ function renderSetup(){
 
     <div>
       <label>🔊 Stemme</label>
-      <select id="fVoice">
-        <option value="">Automatisk — beste norske stemme på denne enheten</option>
-        ${norwegianVoices().map(v=>`<option value="${esc(v.name)}" ${v.name===voiceName?'selected':''}>${esc(v.name)} (${esc(v.lang)})${v.default?' · standard':''}</option>`).join('')}
-      </select>
+      <select id="fVoice" aria-label="Norsk stemme">${voiceOptions()}</select>
       <div class="t2" style="margin-top:5px;font-size:11px">Utvalget kommer fra telefonen/nettleseren og kan derfor være forskjellig på hver telefon.</div>
       <button class="btn ghost sm" id="testVoice" style="margin-top:7px">▶️ Prøv stemmen</button>
     </div>
@@ -629,42 +710,46 @@ function renderSetup(){
   </div>`;
 
   document.querySelectorAll('#kidRow .kid[data-i]').forEach(t=>t.onclick=()=>{
-    saveForm(); active=parseInt(t.dataset.i,10); saveKids(); render();
+    if(busy || !saveForm()) return; chooseChild(parseInt(t.dataset.i,10)); render();
   });
-  $('addKid').onclick=()=>{ saveForm(); kids.push(blankKid('')); active=kids.length-1; saveKids(); render(); };
+  $('addKid').onclick=()=>{ if(busy || !saveForm()) return; kids.push(blankKid('')); chooseChild(kids.length-1); render(); };
   if($('clrLog')) $('clrLog').onclick=()=>{ if(confirm('Tømme undervisningsloggen?')){ kid().log=[]; saveKids(); render(); } };
   if($('clrNotes')) $('clrNotes').onclick=()=>{ if(confirm('Nullstille alt Spark har lært om dette barnet?')){ kid().notes=[]; saveKids(); render(); } };
-  if($('fVoice')) $('fVoice').onchange=()=>{ voiceName=$('fVoice').value; localStorage.setItem(LS.voiceName,voiceName); };
+  if($('fVoice')) $('fVoice').onchange=()=>{ voiceName=$('fVoice').value; store.setItem(LS.voiceName,voiceName); };
   if($('testVoice')) $('testVoice').onclick=()=>{
-    if($('fVoice')){ voiceName=$('fVoice').value; localStorage.setItem(LS.voiceName,voiceName); }
-    const who=kid().name||'du'; speak(`Hei ${who}! Nå prøver vi denne stemmen. Skal vi ta en liten oppgave sammen?`, -1);
+    if($('fVoice')){ voiceName=$('fVoice').value; store.setItem(LS.voiceName,voiceName); }
+    const who=kid().name||'du'; speak(`Hei ${who}! Nå prøver vi denne stemmen. Skal vi ta en liten oppgave sammen?`, -1, true);
   };
   if($('unpairBtn')) $('unpairBtn').onclick=()=>{ if(confirm('Koble denne telefonen fra Spark-serveren?')){ unpairDevice(); render(); } };
   if($('pairBtn')) $('pairBtn').onclick=async()=>{
+    if(busy) return;
     try{
-      saveForm();
-      $('pairBtn').disabled=true; $('pairBtn').textContent='Kobler til...';
-      await pairDevice(($('fFamily')?.value||''));
-      render();
-    }catch(e){ alert(e.message||'Kunne ikke koble til.'); $('pairBtn').disabled=false; $('pairBtn').textContent='🔗 Koble denne enheten'; }
+      if(!saveForm()) return;
+      const code=$('fFamily')?.value||''; busy=true;
+      main.querySelectorAll('button,input,textarea,select').forEach(el=>el.disabled=true);
+      $('pairBtn').textContent='Kobler til...';
+      await pairDevice(code);
+    }catch(e){ alert(e.message||'Kunne ikke koble til.'); }
+    finally{ busy=false; render(); }
   };
   $('saveBtn').onclick=()=>{
-    saveForm();
+    if(!saveForm()) return;
     if(!paired()){ alert('Koble denne enheten til Spark-serveren først.'); render(); return; }
     saveKids(); view='start'; render();
   };
 }
 
 function saveForm(){
+  if(busy) return false;
   const oldServer=serverUrl;
-  if($('fServer')) serverUrl=normalizeServer($('fServer').value);
-  if(serverUrl!==oldServer){ localStorage.setItem(LS.server,serverUrl); }
-  if($('fVoice')){ voiceName=$('fVoice').value; localStorage.setItem(LS.voiceName,voiceName); }
-  if($('fName')) kid().name=$('fName').value.trim();
-  if($('fAge')){ const a=parseInt($('fAge').value,10); if(!isNaN(a)&&a>=4&&a<=18) kid().age=a; }
-  if($('fFun')) kid().interests=$('fFun').value.trim();
-  localStorage.setItem(LS.server,serverUrl);
-  saveKids();
+  if($('fServer')) serverUrl=normalizeServer($('fServer').value) || DEFAULT_SERVER_URL;
+  if($('fVoice')){ voiceName=$('fVoice').value; store.setItem(LS.voiceName,voiceName); }
+  if($('fName')) kid().name=$('fName').value.trim().slice(0,40);
+  if($('fAge')){ const a=parseInt($('fAge').value,10); if(!isNaN(a)&&a>=4&&a<=16) kid().age=a; }
+  if($('fFun')) kid().interests=$('fFun').value.trim().slice(0,120);
+  if(!validServer(serverUrl)){serverUrl=oldServer;alert('Bruk en gyldig HTTPS-serveradresse uten sti.');return false;}
+  const saved=store.setItem(LS.server,serverUrl);
+  return saveKids() && saved;
 }
 
 function renderStart(){
@@ -682,7 +767,7 @@ function renderStart(){
     ${startNotice?`<div class="note ok"><strong>${esc(startNotice)}</strong></div>`:''}
 
     ${(()=>{ const s=loadSession();
-      return s&&s.chatMsgs&&s.chatMsgs.length>1
+      return s&&s.chatMsgs&&s.chatMsgs.length>0
       ? `<div class="note info" style="text-align:left">
            <strong>💾 Du har en økt som ikke er ferdig.</strong><br>
            ${esc((s.transcript||s.chatMsgs[0]?.text||'').slice(0,70))}...
@@ -690,27 +775,27 @@ function renderStart(){
          </div>` : ''; })()}
 
     ${kids.length>1?`<div class="kids" id="kidPick">
-      ${kids.map((x,i)=>`<div class="kid ${i===active?'on':''}" data-i="${i}">${esc(x.name||'Barn '+(i+1))}</div>`).join('')}
+      ${kids.map((x,i)=>`<button type="button" class="kid ${i===active?'on':''}" data-i="${i}">${esc(x.name||'Barn '+(i+1))}</button>`).join('')}
     </div>`:''}
 
     <div>
       <label>Hva slags oppgave?</label>
       <div class="tabs" id="modeTabs" style="flex-wrap:wrap">
-        <div class="tab ${taskMode==='matte'?'on':''}" data-t="matte">🔢 Matte</div>
-        <div class="tab ${taskMode==='lesing'?'on':''}" data-t="lesing">📕 Lesing</div>
-        <div class="tab ${taskMode==='lekse'?'on':''}" data-t="lekse">📖 Annet</div>
-        <div class="tab ${taskMode==='quiz'?'on':''}" data-t="quiz">🧠 Quiz</div>
+        <button type="button" class="tab ${taskMode==='matte'?'on':''}" data-t="matte">🔢 Matte</button>
+        <button type="button" class="tab ${taskMode==='lesing'?'on':''}" data-t="lesing">📕 Lesing</button>
+        <button type="button" class="tab ${taskMode==='lekse'?'on':''}" data-t="lekse">📖 Annet</button>
+        <button type="button" class="tab ${taskMode==='quiz'?'on':''}" data-t="quiz">🧠 Quiz</button>
       </div>
       <div class="t2" style="margin-top:6px;font-size:11px">${MODE_HELP[taskMode]}</div>
     </div>
 
     <div class="tabs" id="inTabs">
-      <div class="tab ${inputMode==='camera'?'on':''}" data-m="camera">📷 Ta bilde</div>
-      <div class="tab ${inputMode==='text'?'on':''}" data-m="text">✏️ Skriv</div>
+      <button type="button" class="tab ${inputMode==='camera'?'on':''}" data-m="camera">📷 Ta bilde</button>
+      <button type="button" class="tab ${inputMode==='text'?'on':''}" data-m="text">✏️ Skriv</button>
     </div>
 
     ${inputMode==='camera'?`
-      <div class="drop" id="drop">
+      <div class="drop" id="drop" role="button" tabindex="0" aria-label="Ta eller velg bilde av oppgaven">
         ${hwPreview?`<img src="${hwPreview}" alt="oppgave">`:
           `<div style="font-size:36px">📷</div>
            <div style="font-weight:900;color:#7c5cbf;margin-top:7px">Trykk for å ta bilde</div>
@@ -739,15 +824,17 @@ function renderStart(){
   document.querySelectorAll('#modeTabs .tab').forEach(t=>t.onclick=()=>{taskMode=t.dataset.t;render()});
   document.querySelectorAll('#inTabs .tab').forEach(t=>t.onclick=()=>{inputMode=t.dataset.m;render()});
   if($('kidPick')) document.querySelectorAll('#kidPick .kid').forEach(t=>t.onclick=()=>{
-    active=parseInt(t.dataset.i,10); saveKids(); render();
+    chooseChild(parseInt(t.dataset.i,10)); render();
   });
   const drop=$('drop'), file=$('file');
-  if(drop) drop.onclick=()=>file.click();
+  if(drop){ drop.onclick=()=>file.click(); drop.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();file.click();}}; }
   if(file) file.onchange=async e=>{
     const f=e.target.files[0]; if(!f) return;
-    hwPreview=await shrink(f); render();
+    const load=++photoLoad, owner=active;
+    try{ const image=await shrink(f); if(load===photoLoad && owner===active && view==='start'){hwPreview=image;render();} }
+    catch(err){if(load===photoLoad) alert(err.message);}
   };
-  if($('clearImg')) $('clearImg').onclick=()=>{hwPreview=null;render()};
+  if($('clearImg')) $('clearImg').onclick=()=>{photoLoad++;hwPreview=null;render()};
   if($('hwT')) $('hwT').oninput=e=>{hwText=e.target.value; $('go').disabled=hwText.trim().length<4};
   $('go').onclick=start;
 }
@@ -767,6 +854,7 @@ function renderChat(){
     row.appendChild(b);
     if(m.role!=='user'&&!m.sys&&voiceOn){
       const s=document.createElement('button');
+      s.setAttribute('aria-label',speakingIdx===i?'Stopp opplesing':'Les meldingen høyt');
       s.className='spk'+(speakingIdx===i?' on':'');
       s.textContent=speakingIdx===i?'⏹':'🔊';
       s.onclick=()=>speakingIdx===i?(stopSpeak(),render()):speak(m.text,i);
@@ -797,22 +885,28 @@ function renderQuick(){
        ['🔁 Forklar på nytt','Jeg skjønte ikke helt. Kan du forklare på en annen måte?']];
   quick.innerHTML = opts.map(([l,v])=>`<button class="qb" data-v="${esc(v)}">${l}</button>`).join('');
   quick.querySelectorAll('.qb').forEach(b=>b.onclick=()=>{
-    if(busy) return;
+    if(busy || readOnly || pendingFinal) return;
     $('msg').value=b.dataset.v; send();
   });
 }
 
 /* ================= FLYT ================= */
 async function start(){
+  if(busy || !paired()) return;
+  if(inputMode==='camera'?!hwPreview:hwText.trim().length<4) return;
+  stopSpeak(); stopMic();
   startNotice='';
   const old = loadSession();
-  if(old && old.chatMsgs?.length>1){
+  if(old && old.chatMsgs?.length>0){
     const ok = confirm('Du har en uferdig økt for '+(kid().name||'dette barnet')+'. Starte ny oppgave? Den gamle legges i Tidligere økter.');
     if(!ok) return;
-    const prevChat=chatMsgs, prevHistory=history, prevTranscript=transcript, prevMode=taskMode;
+    const prevChat=chatMsgs, prevHistory=history, prevTranscript=transcript, prevMode=taskMode, prevId=currentSessionId;
     chatMsgs=old.chatMsgs||[]; history=old.history||[]; transcript=old.transcript||''; taskMode=old.mode||taskMode;
-    archiveSession();
+    currentSessionId=old.id||newSessionId();
+    const archived=archiveSession(old.pendingFinal?.summary||'');
     chatMsgs=prevChat; history=prevHistory; transcript=prevTranscript; taskMode=prevMode;
+    currentSessionId=prevId;
+    if(!archived) return;
   }
   if(inputMode==='camera'&&hwPreview){
     history=[{role:'user',content:[
@@ -824,15 +918,15 @@ async function start(){
     history=[{role:'user',content:`${OPENERS[taskMode]}\n\n${hwText}`}];
     chatMsgs=[{role:'user',text:'📝 '+hwText.slice(0,70)+(hwText.length>70?'...':''),sys:true}];
   }
-  readOnly=false; transcript=''; usingBackup=false; backupAnnounced=false;
-  view='chat'; busy=true; render();
+  readOnly=false; transcript=''; pendingFinal=null; currentSessionId=''; usingBackup=false; backupAnnounced=false; $('msg').value='';
+  view='chat'; busy=true; saveSession(); render();
   await turn();
 }
 
 async function send(){
   const t=$('msg').value.trim();
-  if(!t||busy) return;
-  stopSpeak();
+  if(!t||busy||readOnly||pendingFinal||view!=='chat') return;
+  stopSpeak(); stopMic();
   $('msg').value=''; $('msg').style.height='auto';
   chatMsgs.push({role:'user',text:t});
   history.push({role:'user',content:t});
@@ -870,13 +964,15 @@ async function turn(retried){
     busy=false;
     if(isDailyQuota(err))
       m = 'Dagens gratis-kvote er brukt opp. Økten er lagret — dere kan fortsette i morgen. 😊';
-    else if(/quota|429|rate/i.test(m))
+    else if(isMinuteQuota(err))
       m = 'For mange spørsmål på kort tid. Vent et minutt og prøv igjen.';
-    else if(/koblet|401|403|PERMISSION/i.test(m))
+    else if(!err.kind && /koblet|401|403|PERMISSION/i.test(m))
       m = 'Spark-serveren trenger foreldrehjelp. Åpne ⚙️ og koble denne enheten til på nytt.';
+    else if(err.kind==='provider_error')
+      m = 'AI-tjenesten er midlertidig utilgjengelig. Økten beholdes her. Vent litt og prøv igjen.';
     else if(/Failed to fetch|NetworkError/i.test(m))
       m = 'Fikk ikke kontakt med nettet. Sjekk forbindelsen og prøv igjen.';
-    chatMsgs.push({role:'assistant',text:'Oi! '+m});
+    chatMsgs.push({role:'assistant',text:'Oi! '+m,sys:true});
     saveSession(); render();
   }
 }
@@ -890,13 +986,13 @@ function fallbackFinalSummary(){
 
 async function finishHomework(){
   if(busy || readOnly || chatMsgs.length<2) return;
-  const ok=confirm('Ferdig med leksa? Spark lager en kort oppsummering til foreldrene og lagrer økten.');
+  const ok=pendingFinal || confirm('Ferdig med leksa? Spark lager en kort oppsummering til foreldrene og lagrer økten.');
   if(!ok) return;
 
   stopSpeak(); stopMic(); busy=true; render();
-  let summary='';
+  let summary=pendingFinal?.summary||'';
   let closing='Bra jobbet i dag! 🌟';
-  try{
+  if(!pendingFinal) try{
     const finalPrompt = `Barnet eller forelderen har nå trykket «Ferdig med leksa». Avslutt økten nå.
 Skriv først EN kort, varm avslutning til barnet, uten spørsmål og uten ny oppgave.
 Legg deretter aller sist NØYAKTIG én skjult foreldresammendrag-linje i dette formatet:
@@ -917,11 +1013,13 @@ Vær konkret og ærlig ut fra denne samtalen. Ikke legg til PROFIL eller OPPGAVE
     closing = 'Bra jobbet i dag! Økten er lagret. 🌟';
   }
 
-  chatMsgs.push({role:'assistant',text:closing});
+  if(!pendingFinal) chatMsgs.push({role:'assistant',text:closing});
+  pendingFinal={summary}; saveSession();
   busy=false;
-  archiveSession(summary);
+  if(!archiveSession(summary)){render();return;}
+  pendingFinal=null;
   startNotice='✅ Bra jobbet! Økten er ferdig, oppsummert og lagret under Tidligere økter.';
-  readOnly=false; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
+  readOnly=false; pendingFinal=null; photoLoad++; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
   usingBackup=false; backupAnnounced=false;
   view='start'; render();
 }
@@ -929,14 +1027,16 @@ Vær konkret og ærlig ut fra denne samtalen. Ikke legg til PROFIL eller OPPGAVE
 /* ================= TALE INN ================= */
 function speechInputSupported(){ return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
 function toggleMic(){
-  if(!speechInputSupported() || busy || readOnly) return;
+  if(!speechInputSupported() || busy || readOnly || pendingFinal || view!=='chat') return;
   if(listening && recognition){ recognition.stop(); return; }
+  stopSpeak();
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  recognition = new SR();
+  const current = new SR(); recognition=current;
   recognition.lang='nb-NO'; recognition.interimResults=false; recognition.maxAlternatives=1;
-  recognition.onstart=()=>{ listening=true; render(); };
-  recognition.onend=()=>{ listening=false; recognition=null; render(); };
+  recognition.onstart=()=>{ if(recognition!==current)return;listening=true; render(); };
+  recognition.onend=()=>{ if(recognition!==current)return;listening=false; recognition=null; render(); };
   recognition.onerror=e=>{
+    if(recognition!==current)return;
     listening=false; recognition=null;
     if(e.error!=='aborted' && e.error!=='no-speech'){
       chatMsgs.push({role:'assistant',text:'🎙️ Jeg fikk ikke tak i det du sa. Prøv igjen eller skriv svaret.',sys:true});
@@ -944,10 +1044,11 @@ function toggleMic(){
     render();
   };
   recognition.onresult=e=>{
+    if(recognition!==current || view!=='chat' || busy || readOnly)return;
     const said=(e.results?.[0]?.[0]?.transcript||'').trim();
     if(said){ $('msg').value=said; $('msg').dispatchEvent(new Event('input')); }
   };
-  try{ recognition.start(); }catch(e){ listening=false; recognition=null; }
+  try{ recognition.start(); }catch(e){ listening=false; recognition=null; alert('Mikrofonen kunne ikke starte. Sjekk mikrofontillatelsen eller skriv svaret.'); render(); }
 }
 
 /* ================= KNAPPER ================= */
@@ -962,23 +1063,25 @@ $('msg').addEventListener('input',e=>{
   e.target.style.height=Math.min(e.target.scrollHeight,96)+'px';
 });
 $('voiceBtn').onclick=()=>{
-  voiceOn=!voiceOn; localStorage.setItem(LS.voice,voiceOn?'1':'0');
+  voiceOn=!voiceOn; store.setItem(LS.voice,voiceOn?'1':'0');
   if(!voiceOn) stopSpeak(); render();
 };
 $('backBtn').onclick=()=>{                       // tilbake, økten beholdes
-  stopSpeak(); stopMic(); if(!readOnly) saveSession();
+  if(busy) return;
+  stopSpeak(); stopMic(); if(!readOnly && !saveSession()) return;
   readOnly=false; view='start'; render();
 };
 $('newBtn').onclick=()=>{                        // ny oppgave, den gamle arkiveres
+  if(busy) return;
   startNotice=''; stopSpeak(); stopMic();
   if(!readOnly && chatMsgs.length>1){
     if(!confirm('Starte på en ny oppgave? Denne økten lagres under «Tidligere økter».')) return;
-    archiveSession();
+    if(!archiveSession(pendingFinal?.summary||'')) return;
   }
-  readOnly=false; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
+  readOnly=false; pendingFinal=null; photoLoad++; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
   view='start'; render();
 };
-$('cogBtn').onclick=()=>{stopSpeak();stopMic();view='setup';render()};
+$('cogBtn').onclick=()=>{if(busy) return;stopSpeak();stopMic();if(view==='chat'&&!readOnly&&!saveSession())return;view='setup';render()};
 
 /* Androids tilbake-knapp skal ikke lukke appen midt i en oppgave */
 history_guard();
@@ -986,16 +1089,19 @@ function history_guard(){
   window.history.pushState({v:'spark'},'');
   window.addEventListener('popstate',()=>{
     window.history.pushState({v:'spark'},'');
-    if(view==='chat'){ stopSpeak(); stopMic(); if(!readOnly) saveSession(); readOnly=false; view='start'; render(); }
+    if(busy) return;
+    if(view==='chat'){ stopSpeak(); stopMic(); if(!readOnly&&!saveSession()) return; readOnly=false; view='start'; render(); }
     else if(view==='hist'||view==='setup'){ view='start'; render(); }
   });
 }
 
 /* PWA: registrer service worker hvis appen kjøres fra en ekte nettadresse */
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
-  navigator.serviceWorker.register('sw.js').catch(()=>{});
+  navigator.serviceWorker.register('sw.js', {updateViaCache:'none'}).catch(()=>{});
 }
 
+window.addEventListener('pagehide',()=>{if(view==='chat'&&!readOnly) saveSession();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden && view==='chat'&&!readOnly) saveSession();});
 render();
 </script>
 </body>

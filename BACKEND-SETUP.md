@@ -12,6 +12,8 @@ API-nøklene lagres som Cloudflare Secrets og sendes aldri til telefonene.
 - Gemini/OpenRouter/Groq-nøkler finnes bare på serveren.
 - Chat er begrenset til 30 kall/minutt per paret enhet.
 - Paring er begrenset til 6 forsøk/minutt per nettadresse/IP.
+- Alle telefoner deler i tillegg en grense på 40 chat-kall/minutt og 20 koblingsforsøk/minutt.
+- Produksjonsserveren `https://spark-family-api.drasse.workers.dev` er standard i appen. Ingen hemmeligheter ligger i adressen.
 
 > Profiler, stjerner, lærehistorikk og tidligere økter ligger foreløpig lokalt på hver telefon. De synkroniseres ikke mellom telefonene i v5.3.
 
@@ -88,10 +90,11 @@ På hver telefon:
 
 1. Åpne Spark.
 2. Trykk ⚙️.
-3. Lim inn Worker-adressen under **Privat Spark-server**.
-4. Skriv familiekoden.
-5. Trykk **Koble denne enheten**.
-6. Lagre.
+3. Skriv familiekoden.
+4. Trykk **Koble denne enheten**.
+5. Lagre.
+
+Vanlige familietelefoner trenger ikke skrive serveradressen. En annen server kan settes under **Avansert: serveradresse** for utvikling/testing. HTTPS kreves, bortsett fra lokal testing på localhost.
 
 Gjør det samme på Olavs telefon, lillebrors telefon og eventuell foreldremobil. API-nøklene skal aldri skrives inn på telefonene.
 
@@ -127,6 +130,12 @@ npx wrangler secret put GROQ_API_KEY
 
 ## 7. Hvis en telefon blir borte
 
-Den enkleste fullstendige tilbakekallingen er å rotere `DEVICE_SIGNING_SECRET`. Da blir alle eksisterende telefoner logget ut og må pares på nytt. Provider-nøklene trenger ikke endres.
+Den eksisterende `REVOKE_BEFORE`-innstillingen kan tilbakekalle alle token utstedt før et valgt tidspunkt (epoch-millisekunder). Eldre token uten `iat` blir også avvist når grensen er satt. Token som utstedes etter grensen fortsetter å fungere. Dette krever en bevisst serverendring av forelderen; vanlig oppdatering av Spark krever ingen endring av hemmeligheter.
 
 For senere versjoner kan vi legge til individuell enhetsliste/revokering uten å påvirke de andre telefonene.
+
+## Stabiliseringskandidat 22. oktober 2026
+
+Installer den låste deploy-verktøyversjonen med `npm ci` i `backend`. Wrangler 4.152.0 forstår den eksisterende `[secrets].required`-konfigurasjonen; 4.36.0 ignorerer den med en advarsel.
+
+Eksisterende Cloudflare Secrets beholdes ved vanlig `npm run deploy`. Ikke opprett eller hent hemmeligheter for denne oppdateringen. Etter deploy viser `/health` (med godkjent Origin-header) `generation: c2-20261022`. Se `docs/STABILIZATION-C2.md` for verifikasjon og hva som fortsatt må prøves på telefon.

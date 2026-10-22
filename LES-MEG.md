@@ -25,3 +25,5 @@ Spark tilpasser nå undervisningen etter observert forkunnskap, feiltype, støtt
 Tre telefoner kan bruke samme backend helt fint. Selve AI-tilgangen deles, men barneprofiler og tidligere økter er i v5.3 fortsatt lagret lokalt på hver telefon. Hvis samme barn bruker flere forskjellige telefoner, følger ikke historikken automatisk med ennå.
 
 Se `BACKEND-SETUP.md` for oppsett uten API-nøkler på telefonene.
+
+Stabiliseringspakken fra 22. oktober 2026 beholder versjonsnummeret. Den retter norsk stemmevalg, standard serveroppsett, gjenopptak av bildeøkter, profilskille, lagringsfeil og offline-cache. Tester og deploy-status er dokumentert i `docs/STABILIZATION-C2.md`.
