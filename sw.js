@@ -1,6 +1,6 @@
 /* Spark service worker — gjør appen installerbar og robust ved dårlig nett.
    Bump CACHE når du oppdaterer spark.html, ellers serveres den gamle. */
-const CACHE = 'spark-v5-3';
+const CACHE = 'spark-v5-4-r2';
 const FILES = ['./spark.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
