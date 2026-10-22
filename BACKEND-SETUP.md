@@ -139,3 +139,9 @@ For senere versjoner kan vi legge til individuell enhetsliste/revokering uten å
 Installer den låste deploy-verktøyversjonen med `npm ci` i `backend`. Wrangler 4.152.0 forstår den eksisterende `[secrets].required`-konfigurasjonen; 4.36.0 ignorerer den med en advarsel.
 
 Eksisterende Cloudflare Secrets beholdes ved vanlig `npm run deploy`. Ikke opprett eller hent hemmeligheter for denne oppdateringen. Etter deploy viser `/health` (med godkjent Origin-header) `generation: c2-20261022`. Se `docs/STABILIZATION-C2.md` for verifikasjon og hva som fortsatt må prøves på telefon.
+
+## Læringskandidat C3 (ikke deployet)
+
+Neste samlede kandidat bruker `generation: c3-20261022` og `promptVersion: v5.4-c3`. Worker importerer den delte `../arithmetic.js` fra prosjektroten (relativt til backend-mappen); behold hele prosjektstrukturen ved bygging. Ingen nye bindings eller secrets er nødvendige.
+
+Rull ut hele A+B+C samlet etter gjennomgang: Worker, `spark.html`, de fire nye JavaScript-filene og oppdatert `sw.js`. Ikke publiser bare én pakke. `node tests/live-check.mjs --require-worker-candidate` kontrollerer alle ti offentlige filer og Worker-generasjonen etter utrulling, uten token eller AI-kall. Kjør den først når kandidaten faktisk er publisert.

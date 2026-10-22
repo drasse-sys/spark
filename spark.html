@@ -113,6 +113,8 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
 .hide{display:none!important}
 ::-webkit-scrollbar{width:5px}
 ::-webkit-scrollbar-thumb{background:#d5c9f5;border-radius:3px}
+
+.math-visual{margin:8px 0;max-width:100%;white-space:normal}.math-visual svg,.prof svg{width:100%;height:auto;max-height:260px}.math-visual figcaption{font-size:12px;line-height:1.4}.learning-panel,.reading-panel,.practice{padding:12px;background:#f5f1fc;border-radius:14px;line-height:1.5}.learning-panel button,.reading-panel button,.practice button{margin:4px 0;min-height:40px}.ladder-label{font-size:12px;width:100%;color:#504076}.reading-active{background:#ffe3a0}h2{font-size:17px}.quick{max-height:145px;overflow-y:auto}.prof{overflow-wrap:anywhere}.prof input[type=file]{max-width:100%}
 </style>
 </head>
 <body>
@@ -123,7 +125,7 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
       <h1>Spark</h1>
       <div class="sub" id="who">Lekseassistenten din 🌟</div>
     </div>
-    <div class="stars">⭐ <span id="starCount">0</span></div>
+
     <button class="hbtn" id="voiceBtn" aria-label="Slå tale av eller på">🔊</button>
     <button class="hbtn small hide" id="backBtn" aria-label="Tilbake til oppgaver">←</button>
     <button class="hbtn small hide" id="newBtn" aria-label="Ny oppgave">🔄</button>
@@ -140,6 +142,10 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
   </footer>
 </div>
 
+<script src="arithmetic.js"></script>
+<script src="learning.js"></script>
+<script src="visuals.js"></script>
+<script src="learning-ui.js"></script>
 <script>
 /* ================= SPARK v5.3 =================
    Privat Worker beskytter leverandørnøkler.
@@ -182,8 +188,9 @@ function paired(){ return !!(serverUrl && deviceToken && tokenServer===serverUrl
 
 /* ---- barneprofiler ---- */
 function blankKid(name){
-  return { name:name||'', age:8, interests:'', stars:0, notes:[], log:[], sessions:[], level:'' };
+  return { name:name||'', age:8, interests:'', stars:0, notes:[], log:[], sessions:[], level:'', learning:L.empty(), readAloud:false };
 }
+let migrationReady=L.migrate(store,Date.now());
 let kids = [];
 try { kids = JSON.parse(store.getItem(LS.kids) || '[]'); } catch(e){ kids=[]; }
 if(!Array.isArray(kids)) kids=[];
@@ -198,14 +205,20 @@ kids=kids.map(value=>{
   stars:Number.isFinite(k.stars)?Math.max(0,k.stars):0,
   notes:Array.isArray(k.notes)?k.notes.filter(n=>typeof n==='string').map(n=>n.slice(0,90)).slice(-12):[],
   log:Array.isArray(k.log)?k.log.filter(e=>e && ['d','m','t'].every(x=>typeof e[x]==='string')).slice(-20):[],
-  sessions:Array.isArray(k.sessions)?k.sessions.filter(e=>e && typeof e.d==='string' && typeof e.m==='string' && typeof e.t==='string' && validChat(e.msgs)).slice(-8):[]
+  sessions:Array.isArray(k.sessions)?k.sessions.filter(e=>e && typeof e.d==='string' && typeof e.m==='string' && typeof e.t==='string' && (validChat(e.msgs)||Array.isArray(e.msgs)&&e.msgs.length===0)):[],
+  learning:L.normalizeMemory(k.learning)
   };
 });
 if(!kids.length) kids=[blankKid('')];
+kids.forEach(k=>L.prune(k,Date.now()));
+if(migrationReady)store.setItem(LS.kids,JSON.stringify(kids));
+try{const backup=JSON.parse(store.getItem('spark_learning_backup')||'null');if(backup&&Date.now()-backup.createdAt>=30*L.DAY)store.removeItem('spark_learning_backup');}catch{}
 let active = Number(store.getItem(LS.active) || '0');
 if(!Number.isInteger(active) || active<0 || active>=kids.length) active=0;
 const kid = () => kids[active];
 function saveKids(){
+  if(!migrationReady){storageWarning='Migreringen kunne ikke lagres. Frigjør plass og last appen på nytt. Eksisterende data er bevart.';showStatus();return false;}
+  kids.forEach(k=>L.prune(k,Date.now()));
   const saved=store.setItem(LS.kids, JSON.stringify(kids));
   return store.setItem(LS.active, String(active)) && saved;
 }
@@ -246,7 +259,7 @@ function chooseChild(index){
   if(index===active) return;
   stopSpeak(); stopMic(); photoLoad++; hwPreview=null; hwText=''; $('msg').value='';
   chatMsgs=[]; history=[]; transcript=''; pendingFinal=null; readOnly=false; currentSessionId='';
-  active=index; saveKids();
+  resetLearning(); active=index; saveKids();
 }
 
 const $ = id => document.getElementById(id);
@@ -300,7 +313,7 @@ if(synth){
   });
 }
 function speechText(text){
-  return text.replace(/\[\[(?:PROFIL|LOGG|OPPGAVE):[\s\S]*?\]\]/g,'')
+  return stripLearningMarkers(text)
     .replace(/⭐\s*POENG!?/gi,'')
     .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu,'')
     .replace(/[*_#`~]/g,' ')
@@ -335,7 +348,7 @@ function speak(text, idx, force=false){
   u.onend=u.onerror=()=>{if(generation!==speechGeneration)return;speakingIdx=null;if(view==='chat') render()};
   synth.speak(u);
 }
-function stopSpeak(){ speechGeneration++; if(synth) synth.cancel(); speakingIdx=null; }
+function stopSpeak(){ readingRun++; readingSentence=-1; speechGeneration++; if(synth) synth.cancel(); speakingIdx=null; }
 function stopMic(){ const old=recognition; recognition=null; listening=false; if(old){ old.onresult=old.onend=old.onerror=old.onstart=null; try{old.abort();}catch(e){} } }
 
 /* ================= BILDE ================= */
@@ -392,11 +405,12 @@ function migrateLegacySession(){
 }
 migrateLegacySession();
 function saveSession(){
+  if(!migrationReady)return false;
   try{
     if(!currentSessionId) currentSessionId=newSessionId();
     return store.setItem(sessionKey(), JSON.stringify({
       id:currentSessionId, kid:active, mode:taskMode, transcript,
-      chatMsgs, history:transcript?slimHistory():history, pendingFinal, usingBackup, ts:Date.now()
+      chatMsgs, history:transcript?slimHistory():history, pendingFinal, usingBackup, ts:Date.now(), learning:ensureLearning(), schema:3
     }));
   }catch(e){ storageWarning='Kunne ikke lagre økten. Behold appen åpen og prøv igjen.';showStatus();return false; }
 }
@@ -404,6 +418,14 @@ function loadSession(i=active){
   try{
     const s = JSON.parse(store.getItem(sessionKey(i))||'null');
     if(!s || s.kid!==i || !Object.hasOwn(MODE_NAME,s.mode) || !validChat(s.chatMsgs) || !validHistory(s.history) || typeof s.transcript!=='string') return null;
+    const savedAt=[s.ts,s.migratedAt].find(t=>Number.isSafeInteger(t)&&t>0);
+    if(savedAt&&Date.now()-savedAt>=30*L.DAY){
+      if(s.learning?.id&&Array.isArray(s.learning.events)&&!kids[i].learning.sessions.some(a=>a.id===s.learning.id)){
+        kids[i].learning.sessions.push(L.aggregate(s.learning,s.mode,savedAt));
+        if(!saveKids())return null;
+      }
+      store.removeItem(sessionKey(i));return null;
+    }
     if(s.id && kids[i]?.sessions.some(archived=>archived.id===s.id)) return null;
     return s;
   }catch(e){ return null; }
@@ -416,6 +438,7 @@ function resumeSession(){
   transcript = s.transcript || '';
   chatMsgs = s.chatMsgs; history = s.history;
   currentSessionId=typeof s.id==='string'?s.id:newSessionId();
+  restoreLearning(s);
   pendingFinal=typeof s.pendingFinal?.summary==='string'?s.pendingFinal:null;
   usingBackup=!!s.usingBackup; backupAnnounced=usingBackup;
   $('msg').value='';
@@ -425,18 +448,25 @@ function archiveSession(summary=''){
   if(!chatMsgs.length) return true;
   const k = kid();
   const previous=k.sessions;
+  const previousLearning=(k.learning ||= L.empty()).sessions.slice();
+  const ls=ensureLearning();
+  const endedAt=Date.now();
+  if(ls.reflection&&ls.task?.skill&&k.learning.skills[ls.task.skill]&&ls.task.s<=1&&ls.task.completed)k.learning.skills[ls.task.skill].helped=ls.reflection;
+  if(!k.learning.sessions.some(s=>s.id===ls.id))k.learning.sessions.push(L.aggregate(ls,taskMode,endedAt));
   if(!k.sessions) k.sessions = [];
   k.sessions=k.sessions.slice();
   k.sessions.push({
     id:currentSessionId || newSessionId(),
     d:new Date().toLocaleDateString('no-NO'),
+    startedAt:ls.startedAt, endedAt,
     m:taskMode,
     t:(transcript||chatMsgs[0]?.text||'Økt').slice(0,60),
     summary:(summary||'').slice(0,260),
     msgs:chatMsgs.slice(-40)
   });
-  if(k.sessions.length > 8) k.sessions.shift();
-  if(!saveKids()){ k.sessions=previous; return false; }
+  // Retain structured aggregates independently of transcript retention.
+  L.prune(k,Date.now());
+  if(!saveKids()){ k.sessions=previous; k.learning.sessions=previousLearning; return false; }
   if(store.removeItem(sessionKey())) storageWarning='';
   showStatus();
   return true;
@@ -492,7 +522,7 @@ async function callAI(messages){
   const r=await fetchServer('/chat',{
     method:'POST',
     headers:{'content-type':'application/json','authorization':'Bearer '+deviceToken},
-    body:JSON.stringify({mode:taskMode,age:k.age,name:k.name||'',interests:k.interests||'',notes:(k.notes||[]).slice(-8),sessionState:'',messages,transcript:transcript||''})
+    body:JSON.stringify({mode:taskMode,age:k.age,name:k.name||'',interests:k.interests||'',notes:(k.notes||[]).slice(-8),sessionState:learningContext(),messages,transcript:transcript||''})
   });
   const d=await r.json().catch(()=>({}));
   if(r.status===401 && !d.kind){
@@ -504,6 +534,7 @@ async function callAI(messages){
     const e=new Error(d.error||('Spark-serverfeil ('+r.status+')'));
     e.status=r.status; e.kind=d.kind||''; e.details=(d.kind||'')+' '+(d.details||''); throw e;
   }
+  ensureLearning().interventions+=(d.verifier?.interventions||0);
   usingBackup = d.provider && d.provider!=='gemini';
   return d.text.trim();
 }
@@ -515,11 +546,11 @@ function addParentLog(entry){
   const k=kid();
   const last=k.log[k.log.length-1];
   if(last && last.m===taskMode && last.t===clean) return false;
-  k.log.push({ d:new Date().toLocaleDateString('no-NO'), m:taskMode, t:clean });
+  k.log.push({ d:new Date().toLocaleDateString('no-NO'), ts:Date.now(), m:taskMode, t:clean });
   if(k.log.length > 20) k.log.shift();
   return true;
 }
-function harvest(raw){
+function harvest(raw,final=false){
   const k = kid();
   let changed = false;
 
@@ -539,6 +570,10 @@ function harvest(raw){
   const ore = /\[\[OPPGAVE:\s*([\s\S]+?)\]\]/i;
   const om = raw.match(ore);
   if(om && !transcript) transcript = om[1].trim().slice(0,20000);
+  if(transcript&&!ensureLearning().task.expression){
+    const expression=detectExpression(transcript);
+    if(expression){learningSession.task.expression=expression;learningSession.task.skill=arithmeticSkill(expression);}
+  }
 
   // foreldre-logg
   const lre = /\[\[LOGG:\s*([^\]]+)\]\]/gi;
@@ -548,12 +583,9 @@ function harvest(raw){
     if(addParentLog(entry)) changed = true;
   }
 
-  // stjerner
-  const pts = (raw.match(/⭐\s*POENG/gi)||[]).length;
-  if(pts){ k.stars += pts; changed = true; }
-
+  if(!final)receiveLearning(raw);
   if(changed) saveKids();
-  return demarkdown(raw.replace(re,'').replace(lre,'').replace(ore,'').trim());
+  return demarkdown(stripLearningMarkers(raw));
 }
 
 /* Fjerner markdown uten å ødelegge gangetegn (3 * 4 beholdes) */
@@ -573,7 +605,6 @@ function demarkdown(t){
 /* ================= VISNING ================= */
 function render(){
   const k = kid();
-  $('starCount').textContent = k.stars;
   $('who').textContent = k.name ? (k.name + ' • ' + MODE_NAME[taskMode]) : 'Lekseassistenten din 🌟';
   $('voiceBtn').textContent = voiceOn?'🔊':'🔇';
   $('voiceBtn').className = 'hbtn'+(voiceOn?'':' off');
@@ -610,13 +641,13 @@ function renderHist(){
         <strong>${esc(s.d)} · ${esc(MODE_NAME[s.m]||s.m)}</strong><br>
         ${esc(s.t)}<br>
         ${s.summary?`<span style="display:block;margin-top:5px">📝 ${esc(s.summary)}</span>`:''}
-        <span style="opacity:.6">${s.msgs.length} meldinger — trykk for å lese</span>
+        <span style="opacity:.6">${s.msgs.length?s.msgs.length+' meldinger — trykk for å lese':'Samtaleteksten er slettet etter 30 dager'}</span>
       </button>`).join('') || '<div class="note">Ingen lagrede økter ennå.</div>'}
     <button class="btn ghost" id="backHist">← Tilbake</button>
   </div>`;
   main.querySelectorAll('[data-s]').forEach(el=>el.onclick=()=>{
     const s = k.sessions[parseInt(el.dataset.s,10)];
-    chatMsgs = s.msgs.slice(); history=[]; transcript=''; taskMode=s.m; pendingFinal=null; $('msg').value='';
+    resetLearning(); chatMsgs = s.msgs.length?s.msgs.slice():[{role:'assistant',text:s.summary||'Samtaleteksten er slettet.',sys:true}]; history=[]; transcript=''; taskMode=s.m; pendingFinal=null; $('msg').value='';
     view='chat'; readOnly=true; render();
   });
   $('backHist').onclick=()=>{ view='start'; render(); };
@@ -709,9 +740,11 @@ function renderSetup(){
       <strong>📱 Flere telefoner:</strong> den samme Spark-serveren kan brukes av Olav, lillebror og en tredje telefon. Hver telefon pares én gang. Profiler og økthistorikk er foreløpig lokale på hver telefon og synkroniseres ikke mellom enheter.
     </div>
 
+${parentHTML()}
     <button class="btn" id="saveBtn">💾 Lagre</button>
   </div>`;
 
+  bindParent();
   document.querySelectorAll('#kidRow .kid[data-i]').forEach(t=>t.onclick=()=>{
     if(busy || !saveForm()) return; chooseChild(parseInt(t.dataset.i,10)); render();
   });
@@ -817,11 +850,13 @@ function renderStart(){
       🚀 Sett i gang!
     </button>
 
+    ${learningStartHTML()}
     ${(kid().sessions&&kid().sessions.length)
       ? `<button class="btn ghost sm" id="histBtn">📂 Tidligere økter (${kid().sessions.length})</button>`
       : ''}
   </div>`;
 
+  bindLearningStart();
   if($('resumeBtn')) $('resumeBtn').onclick=resumeSession;
   if($('histBtn')) $('histBtn').onclick=()=>{ view='hist'; render(); };
   document.querySelectorAll('#modeTabs .tab').forEach(t=>t.onclick=()=>{taskMode=t.dataset.t;render()});
@@ -854,6 +889,7 @@ function renderChat(){
     const b=document.createElement('div');
     b.className='bub '+(m.sys?'sys':(m.role==='user'?'me':'them'));
     b.textContent=m.text;
+    for(const visual of m.visuals||[]){const node=document.createElement('div');node.innerHTML=V.render(visual,!!learningSession?.check);b.appendChild(node);}
     row.appendChild(b);
     if(m.role!=='user'&&!m.sys&&voiceOn){
       const s=document.createElement('button');
@@ -870,27 +906,13 @@ function renderChat(){
     row.innerHTML=`<div class="av">⚡</div><div class="dots"><i></i><i></i><i></i></div>`;
     box.appendChild(row);
   }
+  renderLearningPanel(box);
   renderQuick();
   main.scrollTop=main.scrollHeight;
 }
 
 function renderQuick(){
-  const opts = taskMode==='quiz'
-    ? [['🤔 Jeg vet ikke','Jeg vet ikke helt...'],
-       ['💡 Gi meg et hint','Kan du gi meg et hint?'],
-       ['✅ Vis svaret','Jeg står fast — kan du vise meg svaret og forklare hvorfor?']]
-    : taskMode==='lesing'
-    ? [['🤔 Jeg vet ikke','Jeg vet ikke helt...'],
-       ['❓ Hva betyr ordet','Jeg skjønte ikke det ordet. Hva betyr det?'],
-       ['🔁 Forklar på nytt','Jeg skjønte ikke helt. Kan du forklare på en annen måte?']]
-    : [['🤔 Jeg vet ikke','Jeg vet ikke helt...'],
-       ['💡 Gi meg et hint','Kan du gi meg et hint?'],
-       ['🔁 Forklar på nytt','Jeg skjønte ikke helt. Kan du forklare på en annen måte?']];
-  quick.innerHTML = opts.map(([l,v])=>`<button class="qb" data-v="${esc(v)}">${l}</button>`).join('');
-  quick.querySelectorAll('.qb').forEach(b=>b.onclick=()=>{
-    if(busy || readOnly || pendingFinal) return;
-    $('msg').value=b.dataset.v; send();
-  });
+  learningQuick();
 }
 
 /* ================= FLYT ================= */
@@ -903,12 +925,12 @@ async function start(){
   if(old && old.chatMsgs?.length>0){
     const ok = confirm('Du har en uferdig økt for '+(kid().name||'dette barnet')+'. Starte ny oppgave? Den gamle legges i Tidligere økter.');
     if(!ok) return;
-    const prevChat=chatMsgs, prevHistory=history, prevTranscript=transcript, prevMode=taskMode, prevId=currentSessionId;
+    const prevChat=chatMsgs, prevHistory=history, prevTranscript=transcript, prevMode=taskMode, prevId=currentSessionId, prevLearning=learningSession;
     chatMsgs=old.chatMsgs||[]; history=old.history||[]; transcript=old.transcript||''; taskMode=old.mode||taskMode;
-    currentSessionId=old.id||newSessionId();
+    currentSessionId=old.id||newSessionId(); restoreLearning(old);
     const archived=archiveSession(old.pendingFinal?.summary||'');
     chatMsgs=prevChat; history=prevHistory; transcript=prevTranscript; taskMode=prevMode;
-    currentSessionId=prevId;
+    currentSessionId=prevId; learningSession=prevLearning;
     if(!archived) return;
   }
   if(inputMode==='camera'&&hwPreview){
@@ -922,6 +944,8 @@ async function start(){
     chatMsgs=[{role:'user',text:'📝 '+hwText.slice(0,70)+(hwText.length>70?'...':''),sys:true}];
   }
   readOnly=false; transcript=''; pendingFinal=null; currentSessionId=''; usingBackup=false; backupAnnounced=false; $('msg').value='';
+  initHomeworkLearning(inputMode==='text'?hwText:'');
+  chatMsgs.forEach(m=>m.ts=Date.now());
   view='chat'; busy=true; saveSession(); render();
   await turn();
 }
@@ -929,9 +953,12 @@ async function start(){
 async function send(){
   const t=$('msg').value.trim();
   if(!t||busy||readOnly||pendingFinal||view!=='chat') return;
+  if(interceptAnswer(t))return;
+  touchLearning(); ensureLearning().task.attempts++;
+  if(!ensureLearning().task.expression){const expression=detectExpression(t);if(expression){learningSession.task.expression=expression;learningSession.task.skill=arithmeticSkill(expression);}}
   stopSpeak(); stopMic();
   $('msg').value=''; $('msg').style.height='auto';
-  chatMsgs.push({role:'user',text:t});
+  chatMsgs.push({role:'user',text:t,ts:Date.now()});
   history.push({role:'user',content:t});
   busy=true; saveSession(); render();
   await turn();
@@ -948,7 +975,7 @@ async function turn(retried){
         text:'🛟 Gemini er tom for i dag, så jeg fortsetter med reserven. Jeg husker oppgaven!',
         sys:true});
     }
-    chatMsgs.push({role:'assistant',text:shown});
+    chatMsgs.push({role:'assistant',text:shown,ts:Date.now(),visuals:nextVisuals});
     busy=false; saveSession(); render();
     speak(shown, chatMsgs.length-1);
   }catch(err){
@@ -994,8 +1021,9 @@ async function finishHomework(){
 
   stopSpeak(); stopMic(); busy=true; render();
   let summary=pendingFinal?.summary||'';
-  let closing='Bra jobbet i dag! 🌟';
-  if(!pendingFinal) try{
+  let closing='Økten er ferdig.';
+  if(!pendingFinal&&learningSession?.practice){summary='Kort øverunde. Se læringsoversikten for støtte og øving.';}
+  else if(!pendingFinal) try{
     const finalPrompt = `Barnet eller forelderen har nå trykket «Ferdig med leksa». Avslutt økten nå.
 Skriv først EN kort, varm avslutning til barnet, uten spørsmål og uten ny oppgave.
 Legg deretter aller sist NØYAKTIG én skjult foreldresammendrag-linje i dette formatet:
@@ -1005,7 +1033,7 @@ Vær konkret og ærlig ut fra denne samtalen. Ikke legg til PROFIL eller OPPGAVE
     const raw = await callAI(finalMessages);
     const lm = raw.match(/\[\[LOGG:\s*([^\]]+)\]\]/i);
     if(lm) summary = lm[1].trim().replace(/\s+/g,' ').slice(0,240);
-    closing = harvest(raw) || closing;
+    closing = harvest(raw,true) || closing;
     if(!summary){
       summary = fallbackFinalSummary();
       if(addParentLog(summary)) saveKids();
@@ -1013,7 +1041,7 @@ Vær konkret og ærlig ut fra denne samtalen. Ikke legg til PROFIL eller OPPGAVE
   }catch(err){
     summary = fallbackFinalSummary();
     if(addParentLog(summary)) saveKids();
-    closing = 'Bra jobbet i dag! Økten er lagret. 🌟';
+    closing = 'Økten er ferdig.';
   }
 
   if(!pendingFinal) chatMsgs.push({role:'assistant',text:closing});
@@ -1021,9 +1049,9 @@ Vær konkret og ærlig ut fra denne samtalen. Ikke legg til PROFIL eller OPPGAVE
   busy=false;
   if(!archiveSession(summary)){render();return;}
   pendingFinal=null;
-  startNotice='✅ Bra jobbet! Økten er ferdig, oppsummert og lagret under Tidligere økter.';
+  startNotice='Økten er ferdig og lagret. Du kan ta fri nå.';
   readOnly=false; pendingFinal=null; photoLoad++; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
-  usingBackup=false; backupAnnounced=false;
+  usingBackup=false; backupAnnounced=false; resetLearning();
   view='start'; render();
 }
 
@@ -1049,7 +1077,7 @@ function toggleMic(){
   recognition.onresult=e=>{
     if(recognition!==current || view!=='chat' || busy || readOnly)return;
     const said=(e.results?.[0]?.[0]?.transcript||'').trim();
-    if(said){ $('msg').value=said; $('msg').dispatchEvent(new Event('input')); }
+    if(said){ $('msg').value=said; $('msg').dispatchEvent(new Event('input')); voiceNotice='Talen er et tekstforslag. Sjekk og rett teksten før du sender. Spark vurderer ikke uttale.';showStatus(); }
   };
   try{ recognition.start(); }catch(e){ listening=false; recognition=null; alert('Mikrofonen kunne ikke starte. Sjekk mikrofontillatelsen eller skriv svaret.'); render(); }
 }
@@ -1104,7 +1132,7 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
 }
 
 window.addEventListener('pagehide',()=>{if(view==='chat'&&!readOnly) saveSession();});
-document.addEventListener('visibilitychange',()=>{if(document.hidden && view==='chat'&&!readOnly) saveSession();});
+document.addEventListener('visibilitychange',()=>{if(document.hidden && view==='chat'&&!readOnly){if(learningSession)learningSession.lastInteraction=null;stopMic();stopSpeak();saveSession();}});
 render();
 </script>
 </body>

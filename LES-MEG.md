@@ -2,6 +2,14 @@
 
 Leksehjelper for barn som veileder i stedet for å gi ferdige svar.
 
+## Læringskandidat C3 — 22. oktober 2026
+
+Samlet A+B+C-kandidat: synlig hjelpestige, valgfri «Prøv selv», kontrollert regning, ferdighetsminne, korte øverunder og foreldreoversikt. Lesefølget støtter forståelse og gjenfortelling, med foreldrevalgt opplesing og usikre tekstforslag fra mikrofonen. Ingen poeng eller automatisk vurdering av uttale.
+
+Samtaletekst beholdes i 30 dager. Ferdighetshendelser og øktoppsummeringer blir liggende lokalt. Innstillinger har læringskopi, gjenoppretting og sletting per barn; ingen automatisk synkronisering. Gamle profiler og koblede enheter beholdes ved migrering.
+
+Kandidaten er ikke produksjonsdeployet. Implementasjon, testkommandoer, grenser og samlet kontrollert utrulling: `docs/2026-10-22-SPARK-C3-Learning-Evolution-A-B-C.md`.
+
 ## Nytt i v5.3
 
 - Ingen Gemini/OpenRouter/Groq-nøkler på telefonen.

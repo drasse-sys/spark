@@ -7,7 +7,7 @@ import {read,root,script,html} from './helpers.mjs';
 
 test('frontend, Worker, service-worker syntax and manifest/TOML parse; static paths exist',()=>{
   new vm.Script(script);new vm.Script(read('sw.js'));
-  new vm.Script(read('backend/src/index.js').replace('export default','const worker ='));
+  new vm.Script(read('backend/src/index.js').replace("import '../../arithmetic.js';",'').replace('export default','const worker ='));
   const manifest=JSON.parse(read('manifest.json'));assert.equal(manifest.scope,'./');assert.equal(manifest.start_url,'./spark.html');
   for(const path of [manifest.start_url,...manifest.icons.map(i=>i.src),'sw.js'])assert.ok(existsSync(new URL(path,root)),path);
   const config=JSON.parse(execFileSync('python',['-c','import tomllib,json,sys;print(json.dumps(tomllib.load(open(sys.argv[1],"rb"))))',new URL('backend/wrangler.toml',root).pathname.replace(/^\/([A-Z]:)/,'$1')],{encoding:'utf8'}));

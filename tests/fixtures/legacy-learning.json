@@ -1,0 +1,11 @@
+{
+  "spark_kids": [
+    {"name":"Barn A","age":9,"stars":17,"interests":"fotball","notes":["pluss: dele opp hjalp"],"log":[{"d":"21.10.2026","m":"matte","t":"Tosifret pluss | øvde"}],"sessions":[{"d":"21.10.2026","m":"matte","t":"47 + 38","summary":"Brukte tiere","msgs":[{"role":"user","text":"47 + 38"},{"role":"assistant","text":"Begynn med tierne"}]}]},
+    null,
+    {"name":"Barn B","age":6,"notes":["lesing: gjenfortelling",null,42],"sessions":[{},null,{"d":"20.10.2026","m":"lesing","t":"En historie","msgs":[{"role":"assistant","text":"Hvem var med?"}]}]}
+  ],
+  "spark_active":"2",
+  "spark_session_2":{"kid":2,"mode":"lesing","transcript":"En historie","ts":1792690000000,"chatMsgs":[{"role":"user","text":"B sin oppgave"}],"history":[{"role":"user","content":"B sin oppgave"}]},
+  "spark_device_token":"fixture-token-not-learning-data",
+  "spark_device_server":"https://spark-family-api.drasse.workers.dev"
+}

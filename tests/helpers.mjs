@@ -12,7 +12,7 @@ export const body = (extra={}) => ({mode:'lekse',age:8,name:'Barn',interests:'fo
 export function backend(fetch){
   const ctx={crypto:webcrypto,TextEncoder,TextDecoder,Request,Response,URL,AbortSignal,atob,btoa,fetch};
   vm.createContext(ctx);
-  vm.runInContext(read('backend/src/index.js').replace('export default {','globalThis.worker = {')+
+  vm.runInContext(read('arithmetic.js')+'\n'+read('backend/src/index.js').replace("import '../../arithmetic.js';",'').replace('export default {','globalThis.worker = {')+
     ';globalThis.api={makeToken,verifyToken,b64url,hmac,buildSystemPrompt,validatePayload,GEMINI_CHAIN};',ctx);
   return ctx;
 }
@@ -38,7 +38,7 @@ export function frontend({storage={},voices=[],fetch=async()=>Response.json({tex
   w.speechSynthesis={getVoices:()=>currentVoices,cancel(){},speak:u=>spoken.push(u),addEventListener:(name,fn)=>listeners[name]=fn};
   w.SpeechSynthesisUtterance=class {constructor(text){this.text=text;}};
   if(failStorage){w.Storage.prototype.setItem=()=>{throw Error('QuotaExceededError');};}
-  w.eval(script+`;globalThis.testApi={state:()=>({kids,active,taskMode,history,chatMsgs,transcript,view,readOnly,busy,pendingFinal,serverUrl,voiceName,deviceToken}),set:code=>eval(code),pickVoice,norwegianVoices,speak,payload,callAI,saveSession,loadSession,resumeSession,archiveSession,finishHomework,harvest,saveForm,render,start,send,toggleMic,stopMic,validServer};`);
+  w.eval(['arithmetic.js','learning.js','visuals.js','learning-ui.js'].map(read).join('\n')+'\n'+script+`;globalThis.testApi={state:()=>({kids,active,taskMode,history,chatMsgs,transcript,view,readOnly,busy,pendingFinal,serverUrl,voiceName,deviceToken,learningSession}),set:code=>eval(code),pickVoice,norwegianVoices,speak,payload,callAI,saveSession,loadSession,resumeSession,archiveSession,finishHomework,harvest,saveForm,render,start,send,toggleMic,stopMic,validServer,initHomeworkLearning,helpStep,beginCheck,startPractice,advancePractice,learningExport,validateImport,readPassage,arithmeticSkill};`);
   return {w,app:w.testApi,spoken,alerts,dom,voices:value=>{currentVoices=value;listeners.voiceschanged?.();}};
 }
 export const pairedStorage={spark_device_token:'fixture-device',spark_device_server:'https://spark-family-api.drasse.workers.dev'};
