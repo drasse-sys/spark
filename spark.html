@@ -262,11 +262,14 @@ let speechGeneration = 0;
 let voiceName = store.getItem(LS.voiceName) || '';
 
 function voiceId(v){ return v.voiceURI || v.name; }
+function savedVoice(voices){
+  return voiceName && (voices.find(v=>voiceId(v)===voiceName) || voices.find(v=>v.name===voiceName));
+}
 function norwegianRank(v){
   const lang=String(v.lang||'').replace(/_/g,'-').toLowerCase();
-  const preferred=['nb-no','no-no','nb','no','nn-no'];
+  const preferred=['nb-no','no-no','nb','no'];
   const rank=preferred.indexOf(lang);
-  return rank>=0?rank:(/^(nb|no)-/.test(lang)?5:Infinity);
+  return rank>=0?rank:(/^(nb|no)-/.test(lang)?4:(lang==='nn-no'?5:Infinity));
 }
 function refreshVoices(){ voiceList = synth ? synth.getVoices() : []; }
 function norwegianVoices(){
@@ -276,14 +279,14 @@ function norwegianVoices(){
 function pickVoice(){
   refreshVoices();
   // Preserve a saved manual choice while asynchronous lists are empty.
-  const manual=voiceName && voiceList.find(v=>voiceId(v)===voiceName || v.name===voiceName);
+  const manual=savedVoice(voiceList);
   if(manual) return manual;
   return norwegianVoices().slice().sort((a,b)=>norwegianRank(a)-norwegianRank(b) ||
     Number(b.default)-Number(a.default) || Number(b.localService)-Number(a.localService))[0] || null;
 }
 function voiceOptions(){
   const voices=norwegianVoices();
-  const manual=voices.find(v=>voiceId(v)===voiceName || v.name===voiceName);
+  const manual=savedVoice(voices);
   return `<option value="" ${!voiceName?'selected':''}>Automatisk — beste norske stemme på denne enheten</option>`+
     (voiceName&&!manual?`<option value="${esc(voiceName)}" selected>Valgt stemme er ikke tilgjengelig ennå</option>`:'')+
     voices.map(v=>`<option value="${esc(voiceId(v))}" ${v===manual?'selected':''}>${esc(v.name)} (${esc(v.lang)})</option>`).join('');
@@ -326,7 +329,7 @@ function speak(text, idx, force=false){
   const v = pickVoice();
   if(!v){ voiceNotice='Ingen norsk stemme er tilgjengelig ennå. Velg eller installer en norsk stemme i telefonens taleinnstillinger, og prøv igjen under ⚙️ Stemme.'; showStatus(); return; }
   voiceNotice=''; showStatus();
-  u.voice = v; u.lang = v.lang;
+  u.voice = v; u.lang = v.lang.replace(/_/g,'-');
   u.rate=.96; u.pitch=1.0; u.volume=1;
   u.onstart=()=>{if(generation!==speechGeneration)return;speakingIdx=idx;if(view==='chat') render()};
   u.onend=u.onerror=()=>{if(generation!==speechGeneration)return;speakingIdx=null;if(view==='chat') render()};

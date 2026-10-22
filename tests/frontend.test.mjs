@@ -10,13 +10,13 @@ test('Norwegian ranking filters language before defaults, names, locality or lis
     const f=frontend({voices:[...foreign,...candidates]});
     assert.equal(f.app.pickVoice().lang,preferred[i]);f.dom.window.close();
   }
-  const f=frontend({voices:[...foreign,voice('nb_NO')]});assert.equal(f.app.pickVoice().lang,'nb_NO');f.dom.window.close();
+  const f=frontend({voices:[...foreign,voice('nb_NO')]});assert.equal(f.app.pickVoice().lang,'nb_NO');f.app.speak('Hei',0);assert.equal(f.spoken[0].lang,'nb-NO');f.dom.window.close();
 });
 test('manual Bokmål choice survives empty asynchronous population and same-name distinct URIs',()=>{
   const f=frontend({storage:{spark_voice_name:'manual-uri'},voices:[]});
   assert.equal(f.app.pickVoice(),null);assert.equal(f.app.state().voiceName,'manual-uri');
   const manual=voice('nb-NO','Bokmål',{voiceURI:'manual-uri'});
-  f.voices([voice('nb-NO','Bokmål',{voiceURI:'other-uri',default:true}),manual,voice('en-US')]);
+  f.voices([voice('en-US','manual-uri',{voiceURI:'foreign-uri'}),voice('nb-NO','Bokmål',{voiceURI:'other-uri',default:true}),manual,voice('en-US')]);
   assert.equal(f.app.pickVoice(),manual);f.app.speak('Hei!',0);
   assert.equal(f.spoken[0].voice,manual);assert.equal(f.spoken[0].lang,'nb-NO');
   f.voices([]);f.voices([manual]);assert.equal(f.app.pickVoice(),manual);f.dom.window.close();

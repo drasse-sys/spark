@@ -4,14 +4,14 @@ The active source is `Spark-v5.3-complete/Spark_v5_3`. This is a stabilization p
 
 ## Repaired behavior
 
-- Automatic voice selection filters language first: nb-NO, no-NO, nb, no, nn-NO, then other nb/no regional tags. Foreign default/local/name matches cannot enter the automatic list. Manual voiceURI selections and legacy saved names survive delayed voice population. No Norwegian voice produces a Norwegian message instead of arbitrary audio. Voice events preserve unsaved settings.
+- Automatic voice selection filters language first: nb-NO, no-NO, nb, no, other nb/no regional tags, and finally nn-NO. Foreign default/local/name matches cannot enter the automatic list. Manual voiceURI matches take priority over legacy saved names and survive delayed voice population. No Norwegian voice produces a Norwegian message instead of arbitrary audio. Voice events preserve unsaved settings.
 - New phones use the stable production Worker URL. An advanced HTTPS override remains available (HTTP localhost is allowed for local testing). Provider keys and the family code are never saved in frontend settings.
 - Autosave keeps the original image until a transcript exists, including the initial pending request. Transcript-only continuation supports the Worker's existing 20,000-character limit. Resume validates stored data and keeps each child's session separate.
 - Navigation is locked during asynchronous chat/finish/pair operations. Child changes clear unsent drafts. Stopped speech recognition cannot write into a different child's input. Read-only archives cannot send requests.
 - Storage errors are visible. Failed archive writes retain the conversation and summary; saving again does not call the provider twice. Local session IDs prevent a successfully archived session from resurfacing if cleanup fails. The existing rolling limit of eight archives remains unchanged.
 - Worker validation rejects malformed/empty message parts and checks actual request bytes even without Content-Length. Token suffixes are rejected. Missing pairing configuration fails closed. Existing R1 global/per-device/per-IP limits, legacy-token compatibility, revocation, R2 prompt ownership and eight-note cap remain intact.
 - Gemini 500/503/504, overload/high-demand and retired-model fallback remains. Upstream 401/403 do not walk the chain or invalidate a phone's device token. Ordinary unsupported request fields do not masquerade as retired models. Bare 429 is classified as minute quota. Provider requests and browser requests have deadlines. Daily-only OpenRouter/Groq fallback and secret redaction remain.
-- Service worker caches only app assets/navigation, keeps unrelated caches, excludes remote API traffic, never caches unsuccessful responses, bypasses HTTP cache during installation, and uses the offline shell after 3.5 seconds of slow network. Root offline launch works. Cache generation is `spark-stabilization-20261022-c2`.
+- Service worker caches only app assets/navigation, keeps unrelated caches, excludes remote API traffic, never caches unsuccessful responses, bypasses HTTP cache during installation, and uses the offline shell after 3.5 seconds of slow network. Root offline launch works. Cache generation is `spark-stabilization-20261022-c2-final`.
 - Mobile zoom is enabled. Header touch targets, keyboard-accessible selectors and icon/input labels are repaired. The public root redirect is included in the active local package.
 
 ## Reproducible checks
@@ -51,7 +51,9 @@ This checks all six public assets against local content hashes and verifies Work
 
 ## Deployment disposition
 
-The frontend remains compatible with the currently live R2 Worker and can ship independently. The new Worker candidate builds successfully, but Wrangler reports no authenticated account; it has not been deployed by this mission. Existing production secrets must be retained. After authenticating Cloudflare, deploy the existing Worker from this package's `backend` directory and run the safe live check with `--require-worker-candidate`.
+The compatible frontend has been pushed to `drasse-sys/spark` main and published on GitHub Pages. Public checks verified content equality for the app, service worker, manifest, redirect and both icons. A separate isolated mobile browser verified public new-phone setup, the default Worker URL, actual browser CORS health and offline root launch, with zero page errors and no pairing/provider POSTs. Worker health returned 200, permitted preflight 204, denied Origin 403 and unauthenticated chat 401.
+
+The new Worker candidate builds successfully, but Wrangler reports no authenticated account; it has not been deployed by this mission. Its health generation marker is still absent in production. Existing production secrets must be retained. After authenticating Cloudflare, deploy the existing Worker from this package's `backend` directory and run the safe live check with `--require-worker-candidate`. End-to-end live authenticated AI calls were not attempted; those contracts and provider behavior were verified with deterministic fixtures.
 
 Queue V4 source-read job `spark-c2-20261022-voice-read` was attempted through the installed Spark client. It refused with `ROUTINE_JOB_INELIGIBLE:MALFORMED_OR_SECURITY:UNREGISTERED_SNAPSHOT`. No model output was accepted, no direct model port was used, and no infrastructure policy was modified. Deterministic tools and frontier reasoning handled the residue. No WAIT/YIELD event occurred.
 

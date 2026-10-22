@@ -1,5 +1,5 @@
 /* Spark stabilization generation. API traffic never enters this cache. */
-const CACHE = 'spark-stabilization-20261022-c2';
+const CACHE = 'spark-stabilization-20261022-c2-final';
 const FILES = ['./spark.html', './manifest.json', './icon-192.png', './icon-512.png'];
 const STATIC_URLS = new Set(FILES.map(path => new URL(path, self.registration.scope).href));
 
