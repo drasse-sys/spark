@@ -44,24 +44,33 @@ node tests/browser-check.mjs
 Safe public checks, after Pages publishes:
 
 ```powershell
-node tests/live-check.mjs
+node tests/live-check.mjs --require-worker-candidate
 ```
 
-This checks all six public assets against local content hashes and verifies Worker health, allowed/denied Origin, preflight and unauthenticated chat rejection. Add `--require-worker-candidate` after Worker deployment to require its `c2-20261022` health marker. It uses no family code/token and triggers no AI inference.
+This checks all six public assets against local content hashes and verifies Worker health, allowed/denied Origin, preflight and unauthenticated chat rejection. `--require-worker-candidate` also requires the deployed `c2-20261022` health marker. It uses no family code/token and triggers no AI inference.
 
 ## Deployment disposition
 
 The compatible frontend has been pushed to `drasse-sys/spark` main and published on GitHub Pages. Public checks verified content equality for the app, service worker, manifest, redirect and both icons. A separate isolated mobile browser verified public new-phone setup, the default Worker URL, actual browser CORS health and offline root launch, with zero page errors and no pairing/provider POSTs. Worker health returned 200, permitted preflight 204, denied Origin 403 and unauthenticated chat 401.
 
-The new Worker candidate builds successfully, but Wrangler reports no authenticated account; it has not been deployed by this mission. Its health generation marker is still absent in production. Existing production secrets must be retained. After authenticating Cloudflare, deploy the existing Worker from this package's `backend` directory and run the safe live check with `--require-worker-candidate`. End-to-end live authenticated AI calls were not attempted; those contracts and provider behavior were verified with deterministic fixtures.
+**Disposition: STABILIZATION_COMPLETE.** The Cloudflare deployment blocker is resolved. The operator confirmed successful deployment of `spark-family-api`, version `b14b3cd8-920d-46a1-80e4-81eb34805e45`, to `https://spark-family-api.drasse.workers.dev`. The operator's deployed binding report matches the candidate: chat 30/60s, pairing 6/60s, global chat 40/60s, global pairing 20/60s, production GitHub Pages Origin, and `BACKUP_PROVIDER=none`. No secret rotation or new production resource was needed.
+
+Post-deployment verification on 2026-10-22 passed:
+
+- Live `/health`: HTTP 200, `generation=c2-20261022`, `promptVersion=v5.3-r2`, `backup=none`, approved Origin echoed and `cache-control: no-store`.
+- Approved preflight 204; untrusted Origin and untrusted preflight 403; missing Origin 403; unauthenticated `/chat` 401.
+- Malformed JSON sent to `/pair` returns 400 with the new JSON-validation message. A streamed oversized `/pair` body, sent without Content-Length, returns 413. These two validation probes included no family-code guess, issued no token and invoked no provider.
+- All six public assets still match the tested source at frontend implementation commit `36d6fa6b4897239d39ad2088b1a3f05eff2afe9f`. No frontend or Worker implementation changes were made during deployment closeout.
+- An isolated mobile Chromium check against the public site passed setup/default URL, actual browser CORS health against the new Worker and offline root launch, with zero page errors and zero pairing/provider POSTs.
+
+The retained tested Worker bundle's source map embeds the exact current `backend/src/index.js`. Normalized Worker source SHA-256: `0f35068fcad2c872ad3cadcbdb992ceafa3536319e18c71fb87dedb972f75eac`; tested bundle SHA-256: `2ab8fef4f85b179d52575d89b53823550151081334b0ade91ca1f418a5fa8941`. Artifact inspection confirms the 500/503/504 and high-demand/overload chain, controlled non-overload failures, provider-auth status normalization, byte limits, deadlines, R1 global limits/revocation, arbitrary-system rejection, eight-note cap and secret redaction are in that candidate. These behaviors already passed the 45-test suite; completed local tests were not repeated for deployment closeout.
+
+Evidence boundary: the version ID and deployed binding report come from the operator's successful Wrangler deployment. Live generation and the new validation behavior independently confirm the candidate is serving. Wrangler version-metadata access remains unauthenticated in this agent environment, and no authenticated Cloudflare browser was available; a remote source checksum was not retrieved. No real Gemini inference or forced production overload was attempted. Provider execution/fallback remains supported by the tested artifact and deterministic runtime tests, with one real paired-phone smoke remaining below.
 
 Queue V4 source-read job `spark-c2-20261022-voice-read` was attempted through the installed Spark client. It refused with `ROUTINE_JOB_INELIGIBLE:MALFORMED_OR_SECURITY:UNREGISTERED_SNAPSHOT`. No model output was accepted, no direct model port was used, and no infrastructure policy was modified. Deterministic tools and frontier reasoning handled the residue. No WAIT/YIELD event occurred.
 
-## Remaining device checks
+## Remaining manual smoke
 
-1. On Vivaldi, listen to automatic Norwegian and a saved manual Bokmål voice after closing/reopening the app.
-2. On both phones, take a real homework photo, resume after reload, then continue using text.
-3. Check microphone permission, dictation, stop and retry on each supported phone browser.
-4. Open/update the installed PWA online, then reopen offline; confirm settings/profile retention.
+On an already paired phone: photograph a real task → receive a Gemini answer → send a text follow-up → press «Ferdig med leksa» and confirm the archived summary. Listen to Norwegian playback during this smoke; real-device audio quality and microphone behavior cannot be established by headless checks. This is a final real-device smoke, not an outstanding deployment blocker.
 
 One independent review is warranted for the combined persistence and Worker boundary changes. No review PASS is claimed here. Cross-device sync, mastery, analytics/activity charts, reading-aloud correction, Gemini natural TTS and large gamification remain deferred; no new release number is recommended just for this package.
