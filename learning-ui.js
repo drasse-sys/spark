@@ -12,11 +12,11 @@ function resetLearning(){learningSession=null;nextVisuals=[];pendingWords=[];rea
 function restoreLearning(s){
   resetLearning();
   if(s.learning&&s.learning.id===s.id&&s.learning.task&&Array.isArray(s.learning.events)){
-    learningSession=s.learning;learningSession.task.s=L.level(learningSession.task.s);learningSession.lastInteraction=null;
+    learningSession=s.learning;L.boundSession(learningSession);learningSession.task.s=L.level(learningSession.task.s);learningSession.lastInteraction=null;learningSession.answerTarget=null;
   }else freshLearning();
 }
 function nextLearningTask(skill='annet'){
-  const s=ensureLearning();s.task=L.task('t'+(++s.taskCount),skill);s.check=null;s.transferOffer=null;s.softHelp=false;s.confidence='';saveSession();
+  const s=ensureLearning();s.task=L.task('t'+(++s.taskCount),skill);s.check=null;s.answerTarget=null;s.transferOffer=null;s.softHelp=false;s.confidence='';saveSession();
 }
 function detectExpression(text){
   const clean=String(text||'').trim().replace(/^(?:regn(?: ut)?|hva er)\s+/i,'').replace(/[?=]\s*$/,'').trim();
@@ -39,7 +39,7 @@ function learningContext(){return L.context(ensureLearning(),kid().learning);}
 function recordLearning(ok,verified,kind='task',error='',confidence=''){
   const s=ensureLearning(),t=s.task;
   const e=L.event(kid().learning,t.skill,{id:s.id+':'+t.id+':'+t.attempts,t:Date.now(),sid:s.id,s:t.s,ok,verified,k:kind,e:error,c:confidence});
-  if(e){s.events.push({...e,skill:t.skill});saveKids();}
+  if(e){s.events.push({...e,skill:t.skill});L.boundSession(s);saveKids();}
   return e;
 }
 function offerTransfer(){
@@ -50,6 +50,7 @@ function offerTransfer(){
 }
 function receiveLearning(raw){
   const s=ensureLearning(),t=s.task,m=L.marker(raw);
+  s.answerTarget=null;
   nextVisuals=V.extract(raw);pendingWords=[];
   if(!s.check||s.check.item?.model){
     // Unmarked tutor content cannot be evidence of unaided work.
@@ -71,12 +72,19 @@ function receiveLearning(raw){
 }
 function stripLearningMarkers(raw){return raw.replace(/\[\[[\s\S]*?(?:\]\]|$)/g,'').replace(/⭐?\s*POENG!?/gi,'').trim();}
 function learningReply(text,visuals=[]){chatMsgs.push({role:'assistant',text,ts:Date.now(),visuals});saveSession();render();}
+function ownHomeworkAnswer(){
+  const s=ensureLearning(),t=s.task;
+  if(busy||readOnly||pendingFinal||s.check||s.practice||t.completed||!A.parse(t.expression))return;
+  s.answerTarget={sid:s.id,task:t.id,child:active,expression:t.expression};
+  learningReply('Sjekk hele regnestykket: '+t.expression+' = ?\nSkriv svaret, eller velg «Tilbake til samtalen».');
+}
 function interceptAnswer(input){
   const s=ensureLearning(),t=s.task,item=s.check?.item;
   if(s.check?.done){learningReply('Denne er ferdig. Du kan gå videre eller avslutte.');return true;}
-  if(!item&&(!t.expression||t.completed||!A.answer(input)))return false;
+  const owner=s.answerTarget;
+  if(!item&&(!owner||owner.sid!==s.id||owner.task!==t.id||owner.child!==active||owner.expression!==t.expression||t.completed))return false;
   if(item?.model)return false;
-  const verdict=item?L.checkItem(item,input):A.check(t.expression,input);
+  const verdict=item?L.checkItem(item,input):A.check(owner.expression,input);
   if(!verdict.supported){learningReply('Skriv bare svaret, for eksempel 12, 1,5 eller 1/2. Du kan også velge hjelp.');return true;}
   stopSpeak();stopMic();$('msg').value='';touchLearning();t.attempts++;
   chatMsgs.push({role:'user',text:input,ts:Date.now()});history.push({role:'user',content:input});
@@ -87,6 +95,7 @@ function interceptAnswer(input){
   let reply;
   if(verdict.ok){
     t.completed=true;
+    s.answerTarget=null;
     reply=confidence==='gjetter'?'Svaret stemmer.':t.s===0?'✓ Klarte selv.':t.s===1?'Du fant svaret etter en liten påminnelse.':'Du fant svaret med hjelp.';
     if(kind==='cold'&&confidence==='gjetter')reply+=' Du valgte «gjetter». Vi prøver igjen en annen dag.';
     if(s.check)s.check.done=true;else offerTransfer();
@@ -131,13 +140,14 @@ function recordWord(item,ok,s,c){
   if(ok&&s<=1&&c!=='gjetter'&&delayed)w.box=Math.min(5,(w.box||1)+1);else if(!ok||s>=3)w.box=Math.max(1,(w.box||1)-1);
   w.box ||=1;w.lastAt=now;w.due=now+L.SPACING[w.box-1]*L.DAY;
   w.ev ||= [];w.ev.push({t:now,s,ok,delayed:!!delayed});w.ev=w.ev.slice(-8);
-  ensureLearning().events.push({skill:'readWord',t:now,s,ok,verified:true,k:'word',delayed:!!delayed,item:true});saveKids();
+  ensureLearning().events.push({skill:'readWord',t:now,s,ok,verified:true,k:'word',delayed:!!delayed,item:true});L.boundSession(learningSession);saveKids();
 }
 function helpStep(n){
   if(busy||readOnly||pendingFinal)return;
   const s=ensureLearning(),t=s.task;
   if(kid().age>=8&&!t.attempts&&!s.softHelp){s.softHelp=true;learningReply('Prøv ett steg først? Det er lov å bomme. Trykk på hjelpen igjen hvis du vil.');return;}
   touchLearning();L.support(t,n);s.softHelp=false;
+  s.answerTarget=null;
   if(s.check?.item?.word){learningReply('Ordet er «'+s.check.item.answer+'». Prøv å bruke det i en setning.');L.support(t,4);s.check.done=true;saveSession();render();return;}
   if(s.check){s.check.help=true;s.check=null;}
   $('msg').value=n===1?'Gi meg bare en liten påminnelse, uten metode.':n===2?'Gi meg et lite hint.':n===3?'Del oppgaven i mindre steg.':'Vis metoden med et annet, lignende eksempel.';
@@ -157,12 +167,15 @@ function renderLearningPanel(box){
   if(readOnly)return;
   const s=ensureLearning(),panel=document.createElement('div');panel.className='learning-panel';
   if(s.activeMs>=25*60000)panel.innerHTML+='<p class="note">Du har jobbet en stund. Du kan ta pause eller avslutte nå.</p>';
+  if(!s.check&&!s.practice&&!s.task.completed&&s.task.expression)panel.innerHTML+=s.answerTarget?'<p>Svarer på hele regnestykket: '+esc(s.answerTarget.expression)+' = ?</p><button class="qb" id="cancelAnswerTarget">Tilbake til samtalen</button>':'<button class="qb" id="checkHomework">Sjekk svaret på '+esc(s.task.expression)+'</button>';
   if(s.transferOffer){panel.innerHTML+='<button class="btn ghost sm" id="trySelf">Prøv én lignende oppgave selv</button><button class="qb" id="skipTransfer">Hopp over</button>';}
   if(s.check?.kind==='cold'&&kid().age>=8&&!s.check.done)panel.innerHTML+='<label for="confidence">Før du sender (valgfritt)</label><select id="confidence"><option value="">Velg om du vil</option><option value="sikker">Sikker</option><option value="usikker">Litt usikker</option><option value="gjetter">Gjetter</option></select>';
   if(s.check||s.practice&&!s.practiceDone)panel.innerHTML+=`<button class="qb" id="skipCheck">${s.check?.done?'Ferdig med denne':'Hopp over denne'}</button>`;
   if(!s.check&&!s.practice)panel.innerHTML+='<button class="qb" id="nextLearningTask">Neste deloppgave</button>';
   panel.innerHTML+='<details><summary>Hva hjalp i dag? (valgfritt)</summary><select id="reflection" aria-label="Hva hjalp i dag?"><option value="">Hopp over</option><option>Tallinje</option><option>Dele opp</option><option>Tegne</option><option>Hint</option><option>Prøve igjen</option></select></details>';
   box.appendChild(panel);
+  if($('checkHomework'))$('checkHomework').onclick=ownHomeworkAnswer;
+  if($('cancelAnswerTarget'))$('cancelAnswerTarget').onclick=()=>{s.answerTarget=null;saveSession();render();};
   if($('trySelf'))$('trySelf').onclick=()=>{if(busy)return;const item=s.transferOffer;s.transferOffer=null;beginCheck(item);};
   if($('skipTransfer'))$('skipTransfer').onclick=()=>{s.transferOffer=null;saveSession();render();};
   if($('skipCheck'))$('skipCheck').onclick=()=>{if(busy)return;if(s.practice)advancePractice();else{nextLearningTask();learningReply('Vi fortsetter når du vil.');}};
@@ -192,22 +205,28 @@ function saveWord(w){
   if(items.length>=60){alert('Ordlisten er full. Fjern gamle ord i foreldreoversikten først.');return;}
   items.push({...w,id:newSessionId(),box:1,due:Date.now()+L.DAY,ev:[]});
 }
+function parentEventLabel(e){
+  if(!e.verified)return 'tutorobservasjon · støtte S'+e.s;
+  if(!e.ok)return 'forsøk uten riktig svar · støtte S'+e.s;
+  if(e.c==='gjetter')return 'riktig svar, barnet valgte gjetting · støtte S'+e.s;
+  return e.s===0?'klarte selv':e.s===1?'klarte med liten påminnelse':'klarte med støtte S'+e.s;
+}
 function parentHTML(){
   const m=kid().learning ||= L.empty(),records=Object.entries(m.skills),sessions=m.sessions.slice().sort((a,b)=>(b.startedAt||0)-(a.startedAt||0));
   const names=records.map(([id,r])=>{const events=r.ev||[],sessions=new Set(events.filter(e=>e.s>=3||e.e==='begrep').map(e=>e.sid));return `<li>${esc(L.CATALOG[id]?.label||id)}: ${esc({NY:'Ny',ØVER:'Øver på',MED_STØTTE:'Klarer med hint',SELVSTENDIG:'Klarte med lite eller ingen hjelp',SITTER:'Sitter etter utsatte sjekker'}[L.state(r)])}${r.independentAt?' · selvstendig '+new Date(r.independentAt).toLocaleDateString('nb-NO'):''}${r.retainedAt?' · sitter '+new Date(r.retainedAt).toLocaleDateString('nb-NO'):''}${r.due?' · repetisjon '+new Date(r.due).toLocaleDateString('nb-NO'):''}${sessions.size>=2?' · trengte mye støtte i flere økter':''}${r.helped?' · hjalp: '+esc(r.helped):''}</li>`;}).join('');
-  const weeks=[3,2,1,0].map(n=>{const end=Date.now()-n*7*L.DAY,start=end-7*L.DAY;const counts=[0,0,0];for(const s of sessions)for(const e of s.events||[])if(e.t>=start&&e.t<end)counts[e.s<=1?0:e.s===2?1:2]++;return counts;});
+  const weeks=[3,2,1,0].map(n=>{const end=Date.now()-n*7*L.DAY,start=end-7*L.DAY;const counts=[0,0,0];for(const s of sessions)for(const e of s.events||[])if(e.t>=start&&e.t<end&&e.ok===true&&e.verified===true&&e.c!=='gjetter')counts[e.s<=1?0:e.s===2?1:2]++;return counts;});
   const max=Math.max(1,...weeks.map(a=>a.reduce((x,y)=>x+y,0)));
   const bars=weeks.map((counts,i)=>{let y=100;return counts.map((n,j)=>{const h=n/max*85;y-=h;return `<rect x="${20+i*65}" y="${y}" width="38" height="${h}" fill="${['#2a7558','#b78a26','#7851a9'][j]}"/>`;}).join('');}).join('');
   return `<section class="prof"><h2>Læring over tid</h2><p>Observasjoner av oppgaver, ikke en vurdering av barnet. Samtaler vises bare i «Tidligere økter».</p><ul>${names||'<li>Ingen læringshendelser ennå.</li>'}</ul>
-    <svg viewBox="0 0 290 125" role="img" aria-label="Støtte de siste fire ukene. ${weeks.map((a,i)=>'Uke '+(i+1)+': S0–S1 '+a[0]+', S2 '+a[1]+', S3–S4 '+a[2]).join('. ')}">${bars}<text x="10" y="120" font-size="11">Fire uker siden → nå · S0–S1 / S2 / S3–S4</text></svg><p>Grønn: lite/ingen støtte. Gul: hint. Lilla: mye støtte. Oppgaver etter høyeste støtte, ikke poeng.</p>
+    <svg viewBox="0 0 290 125" role="img" aria-label="Bekreftede riktige svar de siste fire ukene. ${weeks.map((a,i)=>'Uke '+(i+1)+': S0–S1 '+a[0]+', S2 '+a[1]+', S3–S4 '+a[2]).join('. ')}">${bars}<text x="10" y="120" font-size="11">Fire uker siden → nå · S0–S1 / S2 / S3–S4</text></svg><p>Kun bekreftede riktige svar: grønn med lite/ingen støtte (S0–S1), gul med hint (S2), lilla med mye støtte (S3–S4). Forsøk uten bekreftet riktig svar og gjetting er ikke med. Høyeste støtte per oppgave, ikke poeng.</p>
     <p>Utsatte sjekker: ${m.totals.independentCold} med lite/ingen støtte av ${m.totals.cold} observerte. Dette er et læringssignal, ikke en karakter.</p>
-    ${sessions.slice(0,30).map(s=>`<p>${s.startedAt?new Date(s.startedAt).toLocaleString('nb-NO'):'Eldre økt – tidspunkt ukjent'} · ${esc(MODE_NAME[s.mode]||s.mode)} · ${Math.round(s.activeMs/60000)} aktive minutter<br>${(s.events||[]).map(e=>esc(L.CATALOG[e.skill]?.label||e.skill)+' — '+(e.ok&&e.verified&&e.s===0?'klarte selv':e.s<=1?'lite støtte':'støtte S'+e.s)+(e.verified?'':' (tutorobservasjon)')).join('<br>')}${s.reflection?'<br>Hva hjalp: '+esc(s.reflection):''}</p>`).join('')}
+    ${sessions.slice(0,30).map(s=>`<p>${s.startedAt?new Date(s.startedAt).toLocaleString('nb-NO'):'Eldre økt – tidspunkt ukjent'} · ${esc(MODE_NAME[s.mode]||s.mode)} · ${Math.round(s.activeMs/60000)} aktive minutter<br>${(s.events||[]).map(e=>esc(L.CATALOG[e.skill]?.label||e.skill)+' — '+parentEventLabel(e)).join('<br>')}${s.reflection?'<br>Hva hjalp: '+esc(s.reflection):''}</p>`).join('')}
     <p>Samtaleforslag: Be barnet vise én ting det fant ut selv. La barnet være læreren.</p><p>Les høyt sammen med en voksen. Spark vurderer ikke uttale eller leseflyt.</p>
     <label><input type="checkbox" id="readAloudAllowed" ${kid().readAloud?'checked':''}> Tillat «Les for meg» ved tekstforståelse</label>
-    <p>Mikrofon er valgfri. Nettleseren kan sende tale til sin skytjeneste. Spark lagrer ikke lyd. Gjenkjent tekst må sjekkes før sending. Samtaletekst slettes etter 30 dager; læringshendelser og øktoppsummeringer beholdes lokalt.</p>
+    <p>Mikrofon er valgfri. Nettleseren kan sende tale til sin skytjeneste. Spark lagrer ikke lyd. Gjenkjent tekst må sjekkes før sending. Inntil 8 samtaler beholdes i maksimalt 30 dager. Inntil 120 lette øktoppsummeringer og kompakt ferdighetsevidens beholdes lokalt.</p>
     <button class="qb" id="clearWords">Tøm ordlisten</button><button class="qb" id="exportLearning">Last ned læringskopi</button><label for="importLearning">Gjenopprett læringskopi som nye profiler</label><input id="importLearning" type="file" accept="application/json"><button class="qb" id="recoverLearning">Gjenopprett sikkerhetskopi før migrering</button><button class="qb" id="deleteLearning">Slett all historikk for dette barnet</button></section>`;
 }
-function learningExport(){return {schema:'spark-learning-export-v3',createdAt:Date.now(),kids:kids.map(k=>({name:k.name,age:k.age,interests:k.interests,notes:k.notes,log:k.log,sessions:k.sessions,learning:k.learning,readAloud:!!k.readAloud}))};}
+function learningExport(){kids.forEach(k=>L.prune(k,Date.now()));return {schema:'spark-learning-export-v3',createdAt:Date.now(),kids:kids.map(k=>({name:k.name,age:k.age,interests:k.interests,notes:k.notes,log:k.log,sessions:k.sessions,learning:k.learning,readAloud:!!k.readAloud}))};}
 function bindParent(){
   $('readAloudAllowed').onchange=e=>{kid().readAloud=e.target.checked;saveKids();};
   $('clearWords').onclick=()=>{if(confirm('Tømme ordlisten for dette barnet?')){kid().learning.items=[];saveKids();render();}};

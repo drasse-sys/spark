@@ -405,6 +405,7 @@ function migrateLegacySession(){
 }
 migrateLegacySession();
 function saveSession(){
+  if(learningSession)L.boundSession(learningSession);
   if(!migrationReady)return false;
   try{
     if(!currentSessionId) currentSessionId=newSessionId();

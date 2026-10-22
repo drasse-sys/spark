@@ -46,7 +46,10 @@
       height=Math.ceil(v.coins.length/5)*47+10;
       v.coins.forEach((n,i)=>{const x=28+i%5*55,y=25+Math.floor(i/5)*47;body+=`<circle cx="${x}" cy="${y}" r="20" fill="#f3d890" stroke="#785e19"/>`+text(x,y+5,n);});
     }else if(v.type==='klokke'){
-      height=200;label=hideAnswer?`Analog klokke. Kort viser ${v.hour%12||12}, lang viser ${v.minute} minutter.`:`Klokka er ${String(v.hour).padStart(2,'0')}:${String(v.minute).padStart(2,'0')}.`;
+      const h=v.hour%12||12,next=h%12+1,dial=Math.floor(v.minute/5)||12;
+      const short=v.minute===0?`på ${h}`:`mellom ${h} og ${next}`;
+      const long=v.minute%5===0?`på ${dial}`:`${v.minute%5} små streker etter ${dial}`;
+      height=200;label=hideAnswer?`Analog klokke. Den korte viseren peker ${short}. Den lange viseren peker ${long}.`:`Klokka er ${String(v.hour).padStart(2,'0')}:${String(v.minute).padStart(2,'0')}.`;
       body='<circle cx="145" cy="100" r="88" fill="white" stroke="#504076" stroke-width="2"/>';
       for(let n=1;n<=12;n++){const a=n*Math.PI/6;body+=text(145+Math.sin(a)*73,105-Math.cos(a)*73,n);}
       const hand=(angle,length,width)=>`<line x1="145" y1="100" x2="${145+Math.sin(angle)*length}" y2="${100-Math.cos(angle)*length}" stroke="#40305d" stroke-width="${width}" stroke-linecap="round"/>`;

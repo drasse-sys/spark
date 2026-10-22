@@ -12,7 +12,7 @@ export const body = (extra={}) => ({mode:'lekse',age:8,name:'Barn',interests:'fo
 export function backend(fetch){
   const ctx={crypto:webcrypto,TextEncoder,TextDecoder,Request,Response,URL,AbortSignal,atob,btoa,fetch};
   vm.createContext(ctx);
-  vm.runInContext(read('arithmetic.js')+'\n'+read('backend/src/index.js').replace("import '../../arithmetic.js';",'').replace('export default {','globalThis.worker = {')+
+  vm.runInContext(read('arithmetic.js')+'\n'+read('visuals.js')+'\n'+read('backend/src/index.js').replace(/^import .*;$/gm,'').replace('export default {','globalThis.worker = {')+
     ';globalThis.api={makeToken,verifyToken,b64url,hmac,buildSystemPrompt,validatePayload,GEMINI_CHAIN};',ctx);
   return ctx;
 }

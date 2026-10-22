@@ -15,8 +15,8 @@ The existing single-page app keeps ownership of profiles, pairing, photos, navig
 | `visuals.js` | Seven allowlisted numeric schemas and deterministic responsive SVG rendering. |
 | `learning-ui.js` | Task loop, transfer/review, word items, parent view, reflection, reading and learning-only backup controls. |
 | `spark.html` | Integration into accepted session, archive, speech and UI flows. |
-| `backend/src/index.js` | Server prompt `v5.4-c3`; allowlisted learning context; common arithmetic guard for Gemini and backups. Health generation `c3-20261022`. |
-| `sw.js` | Cache generation `spark-learning-20261022-c3`; all four scripts included in the offline shell. |
+| `backend/src/index.js` | Server prompt `v5.4-c3r1`; allowlisted learning context; common arithmetic guard for Gemini and backups. Health generation `c3r1-20261022`. |
+| `sw.js` | Cache generation `spark-learning-20261022-c3r1`; all four scripts included in the offline shell. |
 
 Authentication, token verification, pairing, rate limits, provider secrets, mode allowlist and provider fallback selection are unchanged. Targeted R1/R2 regression tests still run. Learning context remains inside the existing 300-character `sessionState` contract: the Worker parses JSON and reconstructs only allowlisted values, ignoring arbitrary instructions or unknown properties.
 
@@ -38,25 +38,25 @@ One optional strategy reflection is available in the session. It costs no AI cal
 
 `kid.learning.version = 3`, catalogue v1 (36 closed IDs). Unknown model IDs map to `annet`, which has no generated review. The catalogue includes grade bands, labels, generator availability and suggested representations. Words/glosses are separate items, not new skill IDs.
 
-Events retain numeric epoch milliseconds (`t`), support (`s`), outcome (`ok`), kind (`task`, `prøv`, `cold`, `word`), bounded error/confidence fields, session/task-attempt identity, deterministic-verification status and delayed status. Per-skill history is capped at eight events. Small checkpoints retain first independence, first qualifying delayed check, retention date, last practice/session, review box and due date when older events leave the cap. The closed catalogue bounds skill count.
+Events retain numeric epoch milliseconds (`t`), support (`s`), outcome (`ok`), kind (`task`, `prøv`, `cold`, `word`), bounded error/confidence fields, session/task-attempt identity, deterministic-verification status and delayed status. Per-skill verified history is capped at eight events, with up to eight separate non-authoritative observations. Small checkpoints retain first independence, first qualifying delayed check, retention date, last practice/session, review box and due date when older events leave the cap. The closed catalogue bounds skill count.
 
 | Derived state | Rule |
 |---|---|
 | NY | No usable events. |
-| ØVER | Latest answer incorrect, unverified, guessed, or needs S3–S4. |
+| ØVER | Latest verified answer incorrect, guessed, or needs S3–S4; also the initial practice label when only observations exist. |
 | MED_STØTTE | Latest checked success at S2. |
 | SELVSTENDIG | Latest checked success at S0–S1 without the required retained evidence. |
 | SITTER | A qualifying cold success at least one day after previous practice, in another session, and a second qualifying cold success at least seven days after the first. |
 
-Support or unsuccessful evidence removes retained status conservatively. Model observations cannot directly create checked mastery. Reading comprehension observations remain explicitly labelled as tutor observations; word-list exact matching does not claim broad comprehension mastery. `due` is a scheduling property, never a mastery state. Duplicate attempt IDs do not add evidence.
+Verified supported or unsuccessful evidence removes retained status conservatively. Model observations cannot promote or demote verified mastery, change its box/due date, or clear its checkpoints. Recent observed practice still prevents premature delayed-evidence classification. Reading comprehension observations remain explicitly labelled as tutor observations; word-list exact matching does not claim broad comprehension mastery. `due` is a scheduling property, never a mastery state. Duplicate attempt IDs do not add evidence.
 
 ## Exact arithmetic and quota
 
 Grammar: bounded integers (up to six digits per literal), decimal comma (up to three decimal places), unary sign, parentheses and `+ - − * × · / ÷ :`. Evaluation uses reduced BigInt fractions. Limits: 160 characters, six nested parentheses, 20 operations and reduced numerator/denominator bounded by 10^12. Division by zero, scientific notation, thousands separators, decimal points, implicit multiplication, units, variables, ambiguous digit spacing, code and unsupported input are rejected. No `eval` or dynamically executed model code is used.
 
-Typed single-expression homework, transfer and review use the local exact checker. A simple photographed expression can use its extracted transcript. The transcript's interpretation still comes from the model: arithmetic verification does not verify OCR or a word problem's modelling.
+Transfer and review own explicit local answer targets. Single-expression homework uses the local exact checker only after the child selects “Sjekk svaret på [expression]”; otherwise numeric replies reach the tutor without verified evidence. Original-expression ownership clears on help, tutor replies, task/session/child changes and restore (the child can select it again). A simple photographed expression can use its extracted transcript. The transcript's interpretation still comes from the model: arithmetic verification does not verify OCR or a word problem's modelling.
 
-The Worker inspects `SJEKK` markers for every provider. Contradictory, malformed or unsupported checks cause at most one reconciliation generation. If that fails, the child receives a neutral response, with only any bounded photo transcript preserved. For supported checks, child-facing verdict wording is rendered by code so correct markers cannot authorize contradictory prose. Internal reconciliation text is never returned.
+The Worker inspects `SJEKK` markers for every provider. Contradictory, malformed or unsupported checks cause at most one reconciliation generation. If that fails, the child receives a neutral response, with only any bounded photo transcript preserved. For supported checks, code renders the verdict and bounded STEG teaching intents, preserving validated learning markers. Narrow exact legacy arithmetic sentences are also retained. Arbitrary verdict prose is discarded. Reconciliation cannot swap an initially supported expression or child answer. Internal reconciliation text is never returned.
 
 **No-marker limitation:** open-ended tutor reasoning without a check marker cannot be proven arithmetically correct. Such a reply is not marked verified and cannot confer checked independence. Tests cover compliant, contradictory, missing and malformed markers; no live model marker-compliance rate is claimed.
 
@@ -77,9 +77,9 @@ Parent data comes from retained structured session aggregates, independently of 
 
 Activity counts only visible interaction gaps no longer than three minutes. Longer gaps contribute zero; backgrounding and restoring break the interval. After 25 active minutes the child sees a pause suggestion. Time is contextual information, not a target or score.
 
-The parent area shows skill state/dates, support, review dates, recent sessions, active minutes, four weeks of support bars, delayed-check counts, recurring support across sessions and a deterministic conversation suggestion. Transcript text is not rendered in this view. The separate archive remains an explicit family action. There are no grades, rankings or sibling comparisons.
+The parent area shows skill state/dates, support, review dates, recent sessions, active minutes, four weeks of verified-success bars grouped by support, delayed-check counts, recurring support across sessions and a deterministic conversation suggestion. Transcript text is not rendered in this view. The separate archive remains an explicit family action. There are no grades, rankings or sibling comparisons.
 
-Archived transcript messages expire after 30 days; summaries and aggregates remain. Legacy archives with no trustworthy machine time get a 30-day migration grace period. Abandoned active sessions expire after 30 days of inactivity. Images continue to be removed once the transcript is available. Migrating recovery copies also expire after 30 days. Deleting one child's history removes that child's recovery content and leaves siblings intact. Nothing is synced to a cloud.
+The latest eight transcript archives (up to 40 messages each) are retained; their messages expire after 30 days. The latest 120 lightweight aggregate sessions remain, each capped at 120 event records and 240 raw interaction timestamps. Running active duration and skill checkpoints do not depend on these pruned arrays. Active-session evidence/timestamp arrays use the same nested bounds. Legacy archives with no trustworthy machine time get a 30-day migration grace period. Abandoned active sessions expire after 30 days of inactivity. Images continue to be removed once the transcript is available. Migrating recovery copies also expire after 30 days. Deleting one child's history removes that child's recovery content and leaves siblings intact. Nothing is synced to a cloud.
 
 ## Migration, export and recovery
 
@@ -99,7 +99,7 @@ Speech recognition is opt-in text input, not assessment. The recognized draft st
 
 ## Verification
 
-**153/153 automated tests pass: 45 existing stabilization tests plus 108 new checks.** The suite additionally loops over 2,280 small-integer arithmetic comparisons and 150 seeds for every implemented generator. No real AI provider is called.
+**206/206 automated tests pass: the reviewed 153-test suite plus 53 maintained consolidated-repair regressions.** The suite additionally loops over 2,280 small-integer arithmetic comparisons and 150 seeds for every implemented generator. No real AI provider is called.
 
 Coverage includes migration fixtures with multiple children, malformed slots/records, notes and old active sessions; idempotence and interrupted writes; recovery/export/import; deletion isolation; support and history trimming; exact positive/negative/injection-like arithmetic; Worker retries and backup-provider checking; delayed mastery and scheduling; skip/guess behavior; retention/activity; parent transcript exclusion; exact visual quantities/bounds/accessibility; reading fallback/highlighting; and deterministic zero-call flows.
 
@@ -142,3 +142,29 @@ Remaining real-device checks (at most five):
 5. Update the installed PWA and launch offline; check the ladder and visuals on the actual phone.
 
 Recommended next action: one independent review of this complete commit, then one controlled rollout of the Worker and all frontend assets together. `tests/live-check.mjs --require-worker-candidate` is prepared for post-deployment verification of all ten public assets and the new Worker generation; it has not been run against the still-C2 production site.
+
+
+## C3R1 consolidated S8 repair — 2026-10-22
+
+Reviewed base: `1dfc7d014f4c51f99783863a3370cdc5f60b340a`, branch `learning-c3-20261022`. All six actionable findings are repaired together; the accepted A+B+C architecture and security boundaries remain unchanged. No deployment or live provider calls occurred.
+
+| Finding | Repair and regression invariant |
+|---|---|
+| B-1 | Code owns the arithmetic verdict. Up to three STEG intents render verified arithmetic facts, one arithmetic question and/or allowlisted hints. Narrow legacy arithmetic sentence forms survive; arbitrary verdict prose does not. Valid VIS, LOGG, PROFIL, PRØV, ORD, OPPGAVE and STØTTE survive reconciliation. VIS uses the existing shared validator; support takes the maximum across attempts and its outcome is reconciled. At most one retry; supported target/answer identity cannot change on retry. Repeated rejection yields the existing neutral fallback with bounded photo transcript. |
+| B-2 | Explicit original-expression check UI binds answer ownership to child, session, task and expression. Ordinary tutor sub-step answers pass through. Transfer/practice retain their app-owned targets. Help, cancel, navigation and completion invalidate ownership. |
+| I-1 | Unverified events enter a separate eight-observation ring, never the verified event ring or mastery transition. Verified state, box, due date, independence and delayed checkpoints survive model observations. Normalization separates legacy mixed events. Recent observations conservatively affect whether future evidence is truly delayed, without rewriting prior mastery. |
+| I-2 | Hidden clock captions, aria labels and SVG titles describe dial positions, including between-hour and small-tick positions. They never decode the minute/time answer. The hand geometry is unchanged. |
+| I-3 | Per child: 8 transcript archives × 40 messages; 120 recent aggregate sessions × 120 event records × 240 interaction timestamps (the latter two are separate arrays). Verified skill evidence remains 8 events per closed skill plus compact checkpoints; observations have their own 8-event bound. Words remain capped at 60 with 8 events each. Oldest entries leave first, independent of device clock. Cleanup runs at normalization, save, archive and export/import; it is idempotent and preserves sibling isolation and failed-archive rollback. 120 recent sessions supports the four-week parent view at several sessions per day; unusually frequent use can shorten chart coverage. |
+| I-4 | Chart bars count only verified, correct, non-guessed outcomes, grouped by maximum support. Green means S0/S1 success, with S1 explicitly described as a small cue. Failed or unverified attempts receive neutral session labels. Supported success is never labelled unaided. |
+
+Schema remains version 3 and migration ID remains `spark-c3-learning-v1`: this is backward-compatible normalization, with an optional observations field and bounded existing arrays. No credentials, pairing keys or children are reindexed. Existing migration backups remain unchanged. Pruning aggregate/transcript history cannot remove skill checkpoints or the verified ring used to compute mastery. Learning export/import preserves these fields and enforces the same bounds. Previously erased historical checkpoints cannot be reconstructed from absent data.
+
+Quota: zero additional calls for explicit checks, storage, charts or clock rendering; ambiguous numeric tutor replies now correctly use the ordinary tutoring turn. The existing one-reconciliation-generation ceiling remains. Tightly coupled unit repair: Worker SJEKK accepts only a numeric answer followed by `kr` or `kroner`, checks the numeric value, and does not claim unit/model verification. The shared strict arithmetic parser is unchanged; other units remain unsupported.
+
+Validation: baseline **153/153** before repair; expanded suite **206/206** afterward, including **53/53** dedicated B-1/B-2/I-1–I-4 fixtures. These include Worker/provider reconciliation, answer ownership, delayed mastery, migration/reload/export/import, archive failure rollback, 2,000-session storage growth, chart labels, all clock skills and exact hand geometry. Syntax, manifest/TOML, R1/R2, fallback, voices, photos, autosave, archive and service-worker regressions pass. Wrangler 4.152.0 dry-run passes with unchanged bindings. Maintained browser checks pass at 320/390/768 widths, with sub-step routing, explicit ownership, positional clock accessibility, existing C2 flows and real offline service-worker loading; no page errors or horizontal overflow. No real microphone/audio-quality assessment was performed.
+
+The service-worker cache generation is bumped solely to install the repaired frontend assets coherently; Worker health/prompt identifiers and the future live-check target identify C3R1. Queue V4 was not re-probed: the known unregistered-snapshot boundary remains; no Queue/provider infrastructure was changed. Source-mirror comparisons showed only pre-existing line-ending differences from the reviewed base before synchronization.
+
+Deferred S8 nonblocking notes: backwards device clocks; cleanup of active sessions for children never opened; the legacy recovery-copy history edge; trust in parent-imported verified claims; generator variety; word items with `due:null` treated as due. General unit-bearing answers (including local money entry) remain numeric-only; only the tightly coupled Worker currency-marker case above was repaired.
+
+**Focused independent re-review is READY**, limited to the six S8 findings and their maintained regressions, especially the bounded STEG/marker reconciliation and observation/checkpoint separation. Review this consolidated commit before any controlled deployment.
