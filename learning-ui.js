@@ -123,7 +123,7 @@ function startPractice(type){
   const memory=kid().learning ||= L.empty(),now=Date.now();
   let items=type==='review'?L.due(memory,now).map((id,i)=>L.generate(id,Math.floor(now/L.DAY)+i)):
     type==='words'?memory.items.slice(0,3).map(wordItem):[0,1,2].map(n=>L.generate('times2510',Math.floor(now/1000)+n*11));
-  if(type==='review')items=[...items,...memory.items.filter(i=>i.due<=now).map(wordItem)].slice(0,3);
+  if(type==='review')items=[...items,...L.dueWords(memory,now).map(wordItem)].slice(0,3);
   items=items.filter(Boolean);if(!items.length){startNotice='Ingen oppgaver å hente fram akkurat nå. Du kan fortsette med leksa.';render();return;}
   if(!preparePractice())return;
   learningSession.queue=items;learningSession.practiceKind=type==='review'?'cold':'task';advancePractice();
@@ -185,7 +185,7 @@ function renderLearningPanel(box){
   if(taskMode==='lesing')renderReading(box);
 }
 function learningStartHTML(){
-  const memory=kid().learning ||= L.empty(),count=L.due(memory,Date.now()).length+memory.items.filter(i=>i.due<=Date.now()).length;
+  const memory=kid().learning ||= L.empty(),count=L.due(memory,Date.now()).length+L.dueWords(memory,Date.now()).length;
   const learned=Object.entries(memory.skills).filter(([,r])=>['SELVSTENDIG','SITTER'].includes(L.state(r)));
   return `<details class="practice"><summary>En liten øverunde${count?' · noe er klart for repetisjon':''}</summary><p class="t2">Inntil tre oppgaver. Du kan hoppe over.</p><button class="btn ghost sm" id="reviewStart">5-minutters oppvarming</button><button class="qb" id="timesStart">Gangetabell</button><button class="qb" id="wordsStart">Ukeord / gloser</button><details><summary>Legg inn ord til øving</summary><label for="wordList">Ett ord | forklaring per linje (maks 20)</label><textarea id="wordList" rows="3" placeholder="house | hus"></textarea><button class="qb" id="saveWords">Lagre ordene</button></details></details>
   ${learned.length?`<details><summary>Ting jeg kan nå</summary>${learned.map(([id,r])=>`<p>${esc(L.CATALOG[id].label)} · ${L.state(r)==='SITTER'?'Sitter':'Klarte med lite eller ingen hjelp'} · ${new Date(r.independentAt).toLocaleDateString('nb-NO')}</p>`).join('')}</details>`:''}`;

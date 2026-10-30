@@ -36,9 +36,9 @@
     const observation=r.observations?.at(-1);
     const last=Math.max(r.lastAt||0,observation?.t||0);
     const lastSession=observation?.t>=last?observation.sid:r.lastSession;
-    if(e.t<last)return false;
-    const delayed=e.k==='cold'&&last>0&&e.t-last>=DAY&&e.sid!==lastSession;
-    const v={t:e.t,s:level(e.s),ok:e.ok,k:e.k,e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',sid:String(e.sid).slice(0,80),id:String(e.id).slice(0,120),verified:e.verified===true,delayed};
+    const t=Math.max(e.t,last);// A backwards device clock must not discard evidence; clamped events are never "delayed".
+    const delayed=e.k==='cold'&&last>0&&t-last>=DAY&&e.sid!==lastSession;
+    const v={t,s:level(e.s),ok:e.ok,k:e.k,e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',sid:String(e.sid).slice(0,80),id:String(e.id).slice(0,120),verified:e.verified===true,delayed};
     // Observations never enter authoritative evidence or change its clock/checkpoints.
     if(!v.verified){v.delayed=false;r.observations=[...(r.observations||[]),v].slice(-LIMITS.observations);return v;}
     const independent=v.ok&&v.verified&&v.s<=1&&v.c!=='gjetter';
@@ -61,6 +61,7 @@
     return v;
   }
   function due(memory,now){return Object.entries(memory.skills).filter(([id,r])=>CATALOG[id]?.generator&&r.due&&r.due<=now).sort((a,b)=>a[1].due-b[1].due||a[0].localeCompare(b[0])).slice(0,3).map(([id])=>id);}
+  function dueWords(memory,now){return (memory.items||[]).filter(w=>Number.isSafeInteger(w.due)&&w.due<=now);}
   function generate(id,seed=0,avoid=''){
     const spec=CATALOG[id];if(!spec?.generator)return null;
     for(let attempt=0;attempt<20;attempt++){
@@ -160,5 +161,5 @@
     const r=memory.skills[t.skill];
     return JSON.stringify({task:t.id,skill:t.skill,s:t.s,state:state(r),kind:session.check?.kind||'task',helped:r?.helped||'',reading:session.readingGoal||''}).slice(0,300);
   }
-  root.SparkLearning={DAY,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,generate,checkItem,activity,boundSession,aggregate,normalizeMemory,prune,migrate,context};
+  root.SparkLearning={DAY,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,checkItem,activity,boundSession,aggregate,normalizeMemory,prune,migrate,context};
 })(globalThis);
