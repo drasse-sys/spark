@@ -75,12 +75,12 @@ for(const status of [400,401,403,429]) test('ordinary provider '+status+' does n
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'device')),env);
   assert.equal(calls,1);assert.equal(r.status,[401,403].includes(status)?502:status);
 });
-test('provider secrets are redacted from both message and details',async()=>{
+test('provider messages and details (and so their secrets) never reach the client',async()=>{
   const {env}=environment();const secrets=['GEMINI_API_KEY','FAMILY_CODE','DEVICE_SIGNING_SECRET','OPENROUTER_API_KEY','GROQ_API_KEY'];
   env.OPENROUTER_API_KEY='fixture-router-key';env.GROQ_API_KEY='fixture-groq-key';
   const b=backend(async()=>Response.json({error:{message:secrets.map(k=>env[k]).join(' '),details:secrets.map(k=>env[k])}},{status:400}));
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'device')),env);const text=await r.text();
-  for(const key of secrets)assert.ok(!text.includes(env[key]),key);assert.ok(text.includes('[redacted]'));
+  for(const key of secrets)assert.ok(!text.includes(env[key]),key);assert.equal(JSON.parse(text).error,'AI-tjenesten svarte ikke. Prøv igjen litt senere.');assert.ok(!('details' in JSON.parse(text)));
 });
 for(const provider of ['openrouter','groq']) test('daily quota uses configured '+provider+' text backup only',async()=>{
   const sent=[];const b=backend(async(url,init)=>{sent.push({url,body:JSON.parse(init.body)});return sent.length===1?Response.json({error:{message:'requests per day quota'}},{status:429}):Response.json({choices:[{message:{content:'Vi fortsetter.'}}]});});

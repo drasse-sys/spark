@@ -14,7 +14,7 @@ export function backend(fetch){
   const ctx={logs,console:{log:(...a)=>logs.push(a.join(' '))},crypto:webcrypto,TextEncoder,TextDecoder,Request,Response,URL,AbortSignal,atob,btoa,fetch};
   vm.createContext(ctx);
   vm.runInContext(read('arithmetic.js')+'\n'+read('visuals.js')+'\n'+read('backend/src/index.js').replace(/^import .*;$/gm,'').replace('export default {','globalThis.worker = {')+
-    ';globalThis.api={makeToken,verifyToken,b64url,hmac,buildSystemPrompt,validatePayload,GEMINI_CHAIN};',ctx);
+    ';globalThis.api={makeToken,verifyToken,b64url,hmac,buildSystemPrompt,validatePayload,GEMINI_CHAIN,callGemini,chainAdvance,CHAIN_BUDGET_MS};',ctx);
   return ctx;
 }
 export function environment(extra={}){

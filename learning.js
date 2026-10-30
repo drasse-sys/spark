@@ -2,7 +2,9 @@
 (function(root){
   'use strict';
   const DAY=86400000, VERSION=3, MIGRATION='spark-c3-learning-v1', SPACING=[1,3,7,21,60];
-  const LIMITS=Object.freeze({archives:8,sessions:120,events:120,interactions:240,observations:8});
+  const LIMITS=Object.freeze({archives:8,sessions:120,events:120,interactions:240,observations:8,imported:16});
+  // A stored time more than CLOCK_SKEW after the caller's reference time came from a clock that was ahead.
+  const CLOCK_SKEW=DAY;
   const rows=[
     ['number20','Tall til 20','number',1,'tallinje'],['number100','Tall til 100','number',2,'tiere'],['number1000','Plassverdi til 1000','number',3,'tiere'],
     ['friends10','Tiervenner','friends',1,'tierramme'],['friends100','Hundrevenner','friends',2,'tallinje'],['double','Dobling','double',1,'rutenett'],['half','Halvering','half',2,'rutenett'],
@@ -23,21 +25,30 @@
   function marker(text){const m=text.match(/\[\[STØTTE:\s*S([0-4])\s*\|\s*([a-zA-Z0-9_]+)\s*\|\s*(riktig|feil)\s*(?:\|\s*(slurv|fakta|metode|begrep|tolking|ingen))?\s*\]\]/);return m?{s:+m[1],skill:skillId(m[2]),ok:m[3]==='riktig',e:m[4]||'ingen'}:null;}
   function empty(){return {version:VERSION,skills:{},items:[],sessions:[],totals:{cold:0,independentCold:0}};}
   function state(r){
-    const e=r?.ev?.findLast(e=>e.verified);if(!e)return r?.observations?.length||r?.ev?.length?'ØVER':'NY';
+    const e=r?.ev?.findLast(e=>e.verified);if(!e)return r?.observations?.length||r?.ev?.length||r?.imported?.length?'ØVER':'NY';
     if(!e.ok||!e.verified||e.s>=3||e.c==='gjetter')return 'ØVER';
     if(e.s===2)return 'MED_STØTTE';
     return r.retainedAt?'SITTER':'SELVSTENDIG';
   }
-  function event(memory,skill,e){
+  // `now` is the caller's reference time (live UI events: the event time itself). No hidden clock reads.
+  function event(memory,skill,e,now=e?.t){
     skill=skillId(skill);
-    if(!e||!Number.isSafeInteger(e.t)||e.t<0||!e.sid||!e.id||!['task','prøv','cold','word'].includes(e.k)||typeof e.ok!=='boolean')return false;
+    if(!e||!Number.isSafeInteger(e.t)||e.t<0||!Number.isSafeInteger(now)||!e.sid||!e.id||!['task','prøv','cold','word'].includes(e.k)||typeof e.ok!=='boolean')return false;
     const r=memory.skills[skill] ||= {ev:[],box:0,due:null};
     if(r.ev.some(x=>x.id===e.id)||(r.observations||[]).some(x=>x.id===e.id))return false;
     const observation=r.observations?.at(-1);
-    const last=Math.max(r.lastAt||0,observation?.t||0);
-    const lastSession=observation?.t>=last?observation.sid:r.lastSession;
-    const t=Math.max(e.t,last);// A backwards device clock must not discard evidence; clamped events are never "delayed".
-    const delayed=e.k==='cold'&&last>0&&t-last>=DAY&&e.sid!==lastSession;
+    const prior=Math.max(r.lastAt||0,observation?.t||0);
+    const lastSession=observation?.t>=prior?observation.sid:r.lastSession;
+    // Clock boundary. Small backwards steps clamp to the last time (evidence kept, never "delayed").
+    // A stored time far ahead of `now` is not an anchor: re-anchor at the event time instead of pinning the skill in the future.
+    // `peak` (highest retained time) blocks delay credit when the clock comes back across an earlier jump.
+    const peak=Math.max(prior,...r.ev.map(x=>x.t),...(r.observations||[]).map(x=>x.t));
+    const plausible=x=>x<=now+CLOCK_SKEW;
+    const last=plausible(peak)?peak:plausible(prior)?prior:0;
+    const jump=!plausible(prior)||(plausible(peak)&&peak>prior+CLOCK_SKEW);
+    const t=Math.max(e.t,last);
+    const delayed=!jump&&e.k==='cold'&&last>0&&t-last>=DAY&&e.sid!==lastSession;
+    if(jump)r.firstColdAt=null;// A retention interval cannot span a clock discontinuity.
     const v={t,s:level(e.s),ok:e.ok,k:e.k,e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',sid:String(e.sid).slice(0,80),id:String(e.id).slice(0,120),verified:e.verified===true,delayed};
     // Observations never enter authoritative evidence or change its clock/checkpoints.
     if(!v.verified){v.delayed=false;r.observations=[...(r.observations||[]),v].slice(-LIMITS.observations);return v;}
@@ -60,8 +71,10 @@
     r.ev.push(v);r.ev=r.ev.slice(-8);
     return v;
   }
-  function due(memory,now){return Object.entries(memory.skills).filter(([id,r])=>CATALOG[id]?.generator&&r.due&&r.due<=now).sort((a,b)=>a[1].due-b[1].due||a[0].localeCompare(b[0])).slice(0,3).map(([id])=>id);}
-  function dueWords(memory,now){return (memory.items||[]).filter(w=>Number.isSafeInteger(w.due)&&w.due<=now);}
+  // A due time beyond the longest spacing from `now` cannot come from a consistent clock and is due now.
+  const dueBy=(d,now)=>d<=now||d>now+SPACING.at(-1)*DAY+CLOCK_SKEW;
+  function due(memory,now){return Object.entries(memory.skills).filter(([id,r])=>CATALOG[id]?.generator&&r.due&&dueBy(r.due,now)).sort((a,b)=>a[1].due-b[1].due||a[0].localeCompare(b[0])).slice(0,3).map(([id])=>id);}
+  function dueWords(memory,now){return (memory.items||[]).filter(w=>Number.isSafeInteger(w.due)&&dueBy(w.due,now));}
   function generate(id,seed=0,avoid=''){
     const spec=CATALOG[id];if(!spec?.generator)return null;
     for(let attempt=0;attempt<20;attempt++){
@@ -119,17 +132,31 @@
     const time=t=>Number.isSafeInteger(t)&&t>0?t:null;
     for(const [id,r] of Object.entries(value.skills)){
       if(!Object.hasOwn(CATALOG,id)||!r||!Array.isArray(r.ev))continue;
-      const valid=[...r.ev,...(Array.isArray(r.observations)?r.observations:[])].filter(e=>e&&time(e.t)&&Number.isInteger(e.s)&&e.s>=0&&e.s<=4&&typeof e.ok==='boolean'&&typeof e.id==='string'&&typeof e.sid==='string'&&['task','prøv','cold','word'].includes(e.k)).map(e=>({t:e.t,s:e.s,ok:e.ok,id:e.id.slice(0,120),sid:e.sid.slice(0,80),k:e.k,e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',verified:e.verified===true,delayed:e.delayed===true}));
+      const clean=list=>(Array.isArray(list)?list:[]).filter(e=>e&&time(e.t)&&Number.isInteger(e.s)&&e.s>=0&&e.s<=4&&typeof e.ok==='boolean'&&typeof e.id==='string'&&typeof e.sid==='string'&&['task','prøv','cold','word'].includes(e.k)).map(e=>({t:e.t,s:e.s,ok:e.ok,id:e.id.slice(0,120),sid:e.sid.slice(0,80),k:e.k,e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',verified:e.verified===true,delayed:e.delayed===true}));
+      const valid=clean([...r.ev,...(Array.isArray(r.observations)?r.observations:[])]),imported=clean(r.imported).slice(-LIMITS.imported);
       const ev=valid.filter(e=>e.verified).slice(-8),observations=valid.filter(e=>!e.verified).slice(-LIMITS.observations);
-      if(!valid.length)continue;
+      if(!valid.length&&!imported.length)continue;
       const box=Number.isInteger(r.box)&&r.box>=0&&r.box<=5?r.box:0;
-      out.skills[id]={ev,observations,box,due:box?time(r.due):null,lastAt:ev.at(-1)?.t||null,lastSession:ev.at(-1)?.sid||null,independentAt:time(r.independentAt),firstColdAt:time(r.firstColdAt),retainedAt:time(r.retainedAt),helped:['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'].includes(r.helped)?r.helped:''};
+      out.skills[id]={ev,observations,box,due:box?time(r.due):null,lastAt:ev.at(-1)?.t||null,lastSession:ev.at(-1)?.sid||null,independentAt:time(r.independentAt),firstColdAt:time(r.firstColdAt),retainedAt:time(r.retainedAt),helped:['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'].includes(r.helped)?r.helped:'',...(imported.length?{imported}:{})};
     }
     if(Array.isArray(value.items))out.items=value.items.filter(w=>w&&typeof w.id==='string'&&typeof w.word==='string'&&typeof w.meaning==='string').slice(0,60).map(w=>({id:w.id.slice(0,80),word:w.word.slice(0,60),meaning:w.meaning.slice(0,160),sentence:typeof w.sentence==='string'?w.sentence.slice(0,220):'',box:Number.isInteger(w.box)&&w.box>=1&&w.box<=5?w.box:1,due:time(w.due),lastAt:time(w.lastAt),ev:Array.isArray(w.ev)?w.ev.filter(e=>e&&time(e.t)&&Number.isInteger(e.s)&&e.s>=0&&e.s<=4&&typeof e.ok==='boolean').slice(-8).map(e=>({t:e.t,s:e.s,ok:e.ok,delayed:e.delayed===true})):[]}));
-    if(Array.isArray(value.sessions))out.sessions=value.sessions.filter(s=>s&&typeof s.id==='string'&&Array.isArray(s.events)).slice(-LIMITS.sessions).map(s=>({id:s.id.slice(0,80),startedAt:time(s.startedAt),endedAt:time(s.endedAt),activeMs:Number.isFinite(s.activeMs)&&s.activeMs>=0?s.activeMs:0,interactions:Array.isArray(s.interactions)?s.interactions.filter(t=>time(t)).slice(-LIMITS.interactions):[],mode:['matte','lesing','lekse','quiz'].includes(s.mode)?s.mode:'lekse',events:s.events.filter(e=>e&&Object.hasOwn(CATALOG,e.skill)&&time(e.t)&&Number.isInteger(e.s)&&e.s>=0&&e.s<=4).slice(-LIMITS.events).map(e=>({skill:e.skill,t:e.t,s:e.s,ok:e.ok===true,verified:e.verified===true,k:['task','prøv','cold','word'].includes(e.k)?e.k:'task',delayed:e.delayed===true,id:typeof e.id==='string'?e.id.slice(0,120):'',sid:typeof e.sid==='string'?e.sid.slice(0,80):'',e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',...(e.item?{item:true}:{})})),reflection:['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'].includes(s.reflection)?s.reflection:'',interventions:Number.isInteger(s.interventions)&&s.interventions>=0?s.interventions:0}));
+    if(Array.isArray(value.sessions))out.sessions=value.sessions.filter(s=>s&&typeof s.id==='string'&&Array.isArray(s.events)).slice(-LIMITS.sessions).map(s=>({id:s.id.slice(0,80),startedAt:time(s.startedAt),endedAt:time(s.endedAt),activeMs:Number.isFinite(s.activeMs)&&s.activeMs>=0?s.activeMs:0,interactions:Array.isArray(s.interactions)?s.interactions.filter(t=>time(t)).slice(-LIMITS.interactions):[],mode:['matte','lesing','lekse','quiz'].includes(s.mode)?s.mode:'lekse',events:s.events.filter(e=>e&&Object.hasOwn(CATALOG,e.skill)&&time(e.t)&&Number.isInteger(e.s)&&e.s>=0&&e.s<=4).slice(-LIMITS.events).map(e=>({skill:e.skill,t:e.t,s:e.s,ok:e.ok===true,verified:e.verified===true,k:['task','prøv','cold','word'].includes(e.k)?e.k:'task',delayed:e.delayed===true,id:typeof e.id==='string'?e.id.slice(0,120):'',sid:typeof e.sid==='string'?e.sid.slice(0,80):'',e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',...(e.item?{item:true}:{})})),reflection:['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'].includes(s.reflection)?s.reflection:'',interventions:Number.isInteger(s.interventions)&&s.interventions>=0?s.interventions:0,...(s.imported===true?{imported:true}:{})}));
     out.totals={cold:Number.isInteger(value.totals?.cold)&&value.totals.cold>=0?value.totals.cold:0,independentCold:Number.isInteger(value.totals?.independentCold)&&value.totals.independentCold>=0?value.totals.independentCold:0};
     out.totals.independentCold=Math.min(out.totals.cold,out.totals.independentCold);
     return out;
+  }
+  // An imported copy is history, not verification authority: no file can prove it was checked by this device's checker.
+  // Evidence moves to `imported` (shown, never counted); checkpoints, credit totals and anchors restart; practised skills and words are due for local revalidation.
+  function quarantine(memory,now){
+    for(const r of Object.values(memory.skills)){
+      r.imported=[...(r.imported||[]),...r.ev,...r.observations].slice(-LIMITS.imported);
+      r.ev=[];r.observations=[];r.box=r.box?1:0;r.due=r.box?now:null;
+      r.lastAt=null;r.lastSession=null;r.independentAt=null;r.firstColdAt=null;r.retainedAt=null;
+    }
+    for(const w of memory.items){w.box=1;w.due=now;w.lastAt=null;}
+    for(const s of memory.sessions)s.imported=true;
+    memory.totals={cold:0,independentCold:0};
+    return memory;
   }
   function prune(k,now){
     k.sessions=(k.sessions||[]).slice(-LIMITS.archives).map(s=>({...s,msgs:Array.isArray(s.msgs)?s.msgs.slice(-40):[]}));
@@ -165,5 +192,5 @@
     const r=memory.skills[t.skill];
     return JSON.stringify({task:t.id,skill:t.skill,s:t.s,state:state(r),kind:session.check?.kind||'task',helped:r?.helped||'',reading:session.readingGoal||''}).slice(0,300);
   }
-  root.SparkLearning={DAY,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,round,checkItem,activity,boundSession,aggregate,normalizeMemory,prune,migrate,context};
+  root.SparkLearning={DAY,CLOCK_SKEW,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,round,checkItem,activity,boundSession,aggregate,normalizeMemory,quarantine,prune,migrate,context};
 })(globalThis);

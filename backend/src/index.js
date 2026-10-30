@@ -8,6 +8,9 @@ const RETIRED = /no longer available|not found|NOT_FOUND|is not supported|does n
 const OVERLOADED = /high demand|overloaded|UNAVAILABLE/i;
 const DAILY = /per day|daily limit|requests per day|\bRPD\b|GenerateRequestsPerDay/i;
 const MINUTE = /per minute|requests per minute|tokens per minute|\bRPM\b|\bTPM\b|rate limit/i;
+const NETWORK = /network connection lost|fetch failed|connection (?:reset|refused|closed)/i;
+// One user request may walk the chain for at most this long; each attempt keeps its own 20 s bound.
+const CHAIN_BUDGET_MS = 45000, ATTEMPT_MS = 20000, MIN_ATTEMPT_MS = 5000;
 const PROMPT_VERSION = 'v5.4-c3r1';
 const enc = new TextEncoder();
 
@@ -110,9 +113,29 @@ async function readBody(request, limit){
 // Privacy-safe technical diagnosis: a category and numbers only. Never message text, prompts, images, keys or tokens.
 function diagnose(e){
   const status=Number.isInteger(e?.status)?e.status:null;
-  const reason=e?.name==='TimeoutError'||e?.name==='AbortError'?'timeout':/^Tomt svar/.test(e?.message||'')?'empty':status?'http_'+status:e?.name==='TypeError'?'network':'other';
+  const reason=e?.name==='TimeoutError'||e?.name==='AbortError'?'timeout':e?.blocked?'blocked':/^Tomt svar/.test(e?.message||'')?'empty':status?'http_'+status:e?.name==='TypeError'||NETWORK.test(e?.message||'')?'network':'other';
   return {reason,status};
 }
+// Intra-Gemini chain policy. Advance only where a different model can plausibly succeed:
+// per-model capacity (5xx/overload), a retired model, a stalled model (timeout), a dropped connection, or an empty reply.
+// Stop on what another model would repeat or what asks us to back off: auth/permission, rate/quota (429),
+// deterministic 4xx and safety blocks of the prompt or reply.
+function chainAdvance(e){
+  if([401,403].includes(e?.status))return false;
+  const message=e?.message||'';
+  if(OVERLOADED.test(message)||[500,502,503,504].includes(e?.status))return true;
+  if(RETIRED.test(message)&&(e?.status===404||/\bmodels?\b/i.test(message)))return true;
+  if(e?.status===429)return false;
+  if(Number.isInteger(e?.status))return false;
+  return ['timeout','empty','network'].includes(diagnose(e).reason);
+}
+// Client-facing text for provider failures is Spark's own; provider messages and details stay on the server.
+const PROVIDER_TEXT={
+  daily_quota:'Dagskvoten hos AI-tjenesten er brukt opp.',
+  minute_quota:'For mange forespørsler på kort tid. Vent litt og prøv igjen.',
+  provider_error:'AI-tjenesten svarte ikke. Prøv igjen litt senere.'
+};
+function clientError(kind,e){return e?.spark?e.message:PROVIDER_TEXT[kind]||PROVIDER_TEXT.provider_error;}
 function logProviderFailure(kind,e,env,backup){
   try{console.log(JSON.stringify({evt:'chat_provider_failure',kind,...diagnose(e),tried:Array.isArray(e?.tried)?e.tried.slice(0,8):undefined,backup:backup||String(env.BACKUP_PROVIDER||'none').toLowerCase(),t:Date.now()}));}catch{}
 }
@@ -452,11 +475,11 @@ function toGemini(messages){
     }).filter(Boolean)
   }));
 }
-async function geminiOnce(env, system, messages, model){
+async function geminiOnce(env, system, messages, model, timeout=ATTEMPT_MS){
   const url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent';
   const r=await fetch(url,{
     method:'POST',
-    signal:AbortSignal.timeout(20000),
+    signal:AbortSignal.timeout(timeout),
     headers:{'content-type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
     body:JSON.stringify({
       system_instruction:{parts:[{text:system}]},
@@ -470,20 +493,23 @@ async function geminiOnce(env, system, messages, model){
     e.status=r.status; e.details=JSON.stringify(d.error?.details||''); throw e;
   }
   const text=(d.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('\n').trim();
-  if(!text) throw new Error('Tomt svar fra Gemini.');
+  if(!text){
+    const e=new Error('Tomt svar fra Gemini.');
+    // A blocked prompt or reply is content-determined; another model would only repeat it.
+    e.blocked=!!d.promptFeedback?.blockReason||['SAFETY','PROHIBITED_CONTENT','BLOCKLIST','SPII','RECITATION'].includes(d.candidates?.[0]?.finishReason);
+    throw e;
+  }
   return text;
 }
-async function callGemini(env, system, messages){
-  let last;const tried=[];
+async function callGemini(env, system, messages, clock=Date.now){
+  let last;const tried=[];const deadline=clock()+CHAIN_BUDGET_MS;
   for(const model of GEMINI_CHAIN){
-    try{return {text:await geminiOnce(env,system,messages,model),model};}
+    const remaining=deadline-clock();
+    if(last&&remaining<MIN_ATTEMPT_MS) break;
+    try{return {text:await geminiOnce(env,system,messages,model,Math.min(ATTEMPT_MS,remaining)),model};}
     catch(e){
       last=e;tried.push(model+':'+diagnose(e).reason);try{e.tried=tried;}catch{}
-      if([401,403].includes(e.status)) throw e;
-      // utgått modell eller midlertidig overbelastet -> prøv neste i kjeden
-      const overloaded=[500,503,504].includes(e.status) || OVERLOADED.test(e.message||'');
-      const retired=RETIRED.test(e.message||'') && (e.status===404 || /\bmodels?\b/i.test(e.message||''));
-      if(!retired && !overloaded) throw e;
+      if(!chainAdvance(e)) throw e;
     }
   }
   throw last||new Error('Ingen Gemini-modell svarte.');
@@ -513,7 +539,7 @@ async function callBackup(env, system, messages, transcript){
     model=env.GROQ_MODEL||'openai/gpt-oss-120b';
   }else return null;
   if(!key) return null;
-  if(hasImage(messages)&&!transcript) throw new Error('Dagskvoten er tom før bildet rakk å bli skrevet av. Skriv oppgaven som tekst, så kan reserven fortsette.');
+  if(hasImage(messages)&&!transcript) throw Object.assign(new Error('Dagskvoten er tom før bildet rakk å bli skrevet av. Skriv oppgaven som tekst, så kan reserven fortsette.'),{spark:true});
   const r=await fetch(url,{
     method:'POST',signal:AbortSignal.timeout(20000),headers:{'content-type':'application/json','authorization':'Bearer '+key},
     body:JSON.stringify({model,max_tokens:700,messages:backupMessages(system,messages,transcript)})
@@ -678,11 +704,11 @@ export default {
           }
           const kind=q.minute?'minute_quota':(q.daily?'daily_quota':'provider_error');
           logProviderFailure(kind,e,env);
-          return json({error:redactSecrets(e.message||'AI-feil',env),kind,reason:diagnose(e).reason,details:redactSecrets(e.details||'',env)},providerStatus(e),c.headers);
+          return json({error:clientError(kind,e),kind,reason:diagnose(e).reason},providerStatus(e),c.headers);
         }
       }catch(e){
         logProviderFailure('provider_error',e,env);
-        return json({error:redactSecrets(e.message||'Reserve-feil',env),kind:'provider_error',reason:diagnose(e).reason},providerStatus(e),c.headers);
+        return json({error:redactSecrets(clientError('provider_error',e),env),kind:'provider_error',reason:diagnose(e).reason},providerStatus(e),c.headers);
       }
     }
 
