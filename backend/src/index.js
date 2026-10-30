@@ -107,6 +107,15 @@ async function readBody(request, limit){
     return {body:JSON.parse(new TextDecoder().decode(bytes))};
   }catch{return {status:400,error:'Ugyldig JSON-forespørsel.'};}
 }
+// Privacy-safe technical diagnosis: a category and numbers only. Never message text, prompts, images, keys or tokens.
+function diagnose(e){
+  const status=Number.isInteger(e?.status)?e.status:null;
+  const reason=e?.name==='TimeoutError'||e?.name==='AbortError'?'timeout':/^Tomt svar/.test(e?.message||'')?'empty':status?'http_'+status:e?.name==='TypeError'?'network':'other';
+  return {reason,status};
+}
+function logProviderFailure(kind,e,env,backup){
+  try{console.log(JSON.stringify({evt:'chat_provider_failure',kind,...diagnose(e),tried:Array.isArray(e?.tried)?e.tried.slice(0,8):undefined,backup:backup||String(env.BACKUP_PROVIDER||'none').toLowerCase(),t:Date.now()}));}catch{}
+}
 function providerStatus(e){
   // Upstream credential failures must not masquerade as an expired device token.
   return Number.isInteger(e.status) && e.status>=400 && e.status<=599 && ![401,403].includes(e.status) ? e.status : 502;
@@ -465,11 +474,11 @@ async function geminiOnce(env, system, messages, model){
   return text;
 }
 async function callGemini(env, system, messages){
-  let last;
+  let last;const tried=[];
   for(const model of GEMINI_CHAIN){
     try{return {text:await geminiOnce(env,system,messages,model),model};}
     catch(e){
-      last=e;
+      last=e;tried.push(model+':'+diagnose(e).reason);try{e.tried=tried;}catch{}
       if([401,403].includes(e.status)) throw e;
       // utgått modell eller midlertidig overbelastet -> prøv neste i kjeden
       const overloaded=[500,503,504].includes(e.status) || OVERLOADED.test(e.message||'');
@@ -668,10 +677,12 @@ export default {
             if(b) return json(await checkedReply(b,note=>callBackup(env,system+'\n'+note,body.messages,body.transcript||'')),200,c.headers);
           }
           const kind=q.minute?'minute_quota':(q.daily?'daily_quota':'provider_error');
-          return json({error:redactSecrets(e.message||'AI-feil',env),kind,details:redactSecrets(e.details||'',env)},providerStatus(e),c.headers);
+          logProviderFailure(kind,e,env);
+          return json({error:redactSecrets(e.message||'AI-feil',env),kind,reason:diagnose(e).reason,details:redactSecrets(e.details||'',env)},providerStatus(e),c.headers);
         }
       }catch(e){
-        return json({error:redactSecrets(e.message||'Reserve-feil',env),kind:'provider_error'},providerStatus(e),c.headers);
+        logProviderFailure('provider_error',e,env);
+        return json({error:redactSecrets(e.message||'Reserve-feil',env),kind:'provider_error',reason:diagnose(e).reason},providerStatus(e),c.headers);
       }
     }
 

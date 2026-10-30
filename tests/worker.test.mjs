@@ -121,3 +121,13 @@ test('network and backup errors are controlled; backup error secrets are redacte
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'d')),env);assert.equal(r.status,502);assert.ok(!(await r.text()).includes(env.GROQ_API_KEY));
   const net=backend(async()=>{throw Error('Network failure');});const nr=await net.worker.fetch(request('/chat',body(),await net.api.makeToken(env,'d')),env);assert.equal(nr.status,502);
 });
+test('S10 provider failures are logged as privacy-safe categories and exposed as a reason',async()=>{
+  const secret='Hjelp meg med leksa';
+  for(const [label,fail,reason,status] of [['timeout',()=>{throw new DOMException('t','TimeoutError');},'timeout',502],['network',()=>{throw new TypeError('fetch failed '+secret);},'network',502],['empty',()=>Response.json({candidates:[{content:{parts:[{text:''}]}}]}),'empty',502],['http',()=>Response.json({error:{message:'bad '+secret}},{status:400}),'http_400',400]]){
+    const b=backend(async()=>fail());const {env}=environment();
+    const r=await b.worker.fetch(request('/chat',body({mode:'matte'}),await b.api.makeToken(env,'d')),env);const data=await r.json();
+    assert.equal(r.status,status,label);assert.equal(data.kind,'provider_error',label);assert.equal(data.reason,reason,label);
+    const line=b.logs.find(l=>l.includes('chat_provider_failure'));assert.ok(line,label);const rec=JSON.parse(line);assert.equal(rec.reason,reason);assert.equal(rec.kind,'provider_error');
+    for(const forbidden of [secret,'fixture-provider-key','fixture-family-code','fixture-signing-key','Bearer','data:image'])assert.ok(!line.includes(forbidden),label+' leaked '+forbidden);
+  }
+});
