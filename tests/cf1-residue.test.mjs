@@ -126,7 +126,7 @@ const fail={
 };
 const blockedReasons=['PROHIBITED_CONTENT','BLOCKLIST','SPII','RECITATION'].map(reason=>['blocked '+reason,()=>Response.json({candidates:[{finishReason:reason}]}),502,'provider_error']);
 const parsed=(parts)=>()=>Response.json({candidates:[{content:{parts}}]});
-const advance=[['malformed parts',parsed([null])],['non-array parts',parsed({text:'x'})],['5xx 500',fail.http(500,'Internal')],['5xx 502',fail.http(502,'Bad gateway')],['5xx 503',fail.http(503,'UNAVAILABLE')],['5xx 504',fail.http(504,'Deadline')],['429 overloaded',fail.http(429,'The model is experiencing high demand')],['retired 404',fail.http(404,'models/x is not found')],['timeout',fail.timeout],['network',fail.network],['network lost',fail.lost],['empty',fail.empty],['invalid json',fail.invalid]];
+const advance=[['malformed parts',parsed([null])],['null body',()=>new Response('null',{status:200,headers:{'content-type':'application/json'}})],['scalar body',()=>Response.json(7)],['non-array parts',parsed({text:'x'})],['5xx 500',fail.http(500,'Internal')],['5xx 502',fail.http(502,'Bad gateway')],['5xx 503',fail.http(503,'UNAVAILABLE')],['5xx 504',fail.http(504,'Deadline')],['429 overloaded',fail.http(429,'The model is experiencing high demand')],['retired 404',fail.http(404,'models/x is not found')],['timeout',fail.timeout],['network',fail.network],['network lost',fail.lost],['empty',fail.empty],['invalid json',fail.invalid]];
 for(const [label,first] of advance)test('CF1 provider: '+label+' advances to the next Gemini model',async()=>{
   let calls=0;const b=backend(async()=>++calls===1?first():success()),{env}=environment();
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'d')),env);

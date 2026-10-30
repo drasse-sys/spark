@@ -491,7 +491,7 @@ async function geminiOnce(env, system, messages, model, timeout=ATTEMPT_MS){
       generationConfig:{maxOutputTokens:900,temperature:0.8,thinkingConfig:{thinkingLevel:'low'}}
     })
   });
-  const d=await r.json().catch(()=>({}));
+  const parsed=await r.json().catch(()=>({})),d=parsed&&typeof parsed==='object'?parsed:{};
   if(!r.ok || d.error){
     const e=new Error(d.error?.message||('Gemini-feil ('+r.status+')'));
     e.status=r.status; e.details=JSON.stringify(d.error?.details||''); throw e;
