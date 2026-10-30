@@ -521,7 +521,7 @@ const TEACHING_HINTS=Object.freeze({
   deleOpp:'Prøv å dele tallene i tiere og enere.',veksle:'Ti enere kan byttes mot én tier.',
   motsatt:'Du kan sjekke med motsatt regneart.',forklare:'Kan du forklare ett steg med egne ord?'
 });
-function teachingSteps(text){
+function teachingSteps(text,checks=[]){
   const steps=[];
   const add=v=>{
     if(!v||typeof v!=='object'||Array.isArray(v))return;
@@ -529,7 +529,17 @@ function teachingSteps(text){
     if(v.type==='hint'&&Object.hasOwn(TEACHING_HINTS,v.strategy))line=TEACHING_HINTS[v.strategy];
     if(typeof v.expression==='string'&&SparkArithmetic.parse(v.expression)){
       if(v.type==='spørsmål')line='Hva er '+v.expression.trim()+'?';
-      if(v.type==='fakta'&&SparkArithmetic.check(v.expression,v.answer).ok)line=v.expression.trim()+' = '+v.answer.trim()+'.';
+      if(v.type==='fakta'&&SparkArithmetic.check(v.expression,v.answer).ok){
+        const a=SparkArithmetic.parse(v.expression);
+        let skip=false;
+        for(const c of checks){
+          if(c.supported===true){
+            const b=SparkArithmetic.parse(c.expression);
+            if(a&&b&&a.n===b.n&&a.d===b.d){skip=true;break;}
+          }
+        }
+        if(!skip)line=v.expression.trim()+' = '+v.answer.trim()+'.';
+      }
     }
     if(line&&!steps.includes(line)&&steps.length<3&&(!line.includes('?')||!steps.some(s=>s.includes('?'))))steps.push(line);
   };
@@ -555,7 +565,7 @@ function inspectReply(text){
     return '[[SJEKK: '+parts.join(' | ')+']]';
   });
   const inspection=SparkArithmetic.inspect(normalized);
-  if((text.match(/\[\[SJEKK:/gi)||[]).length!==inspection.checks.length||inspection.checks.length>4)inspection.repair=true;
+  if((text.match(/\[\[SJEKK:/gi)||[]).length!==inspection.raw||inspection.checks.length>4)inspection.repair=true;
   return {...inspection,normalized};
 }
 function replyMarkers(text,inspection){
@@ -604,7 +614,7 @@ async function checkedReply(first, retry){
   if(inspection.checks.length){
     const verdict=inspection.checks.every(c=>c.ok)?'Svaret stemmer med regnestykket.':'Sjekk regnestykket en gang til. Du kan velge et hint.';
     // An accepted numeric marker licenses neither arbitrary prose nor arbitrary HTML.
-    result={...result,text:[verdict,teachingSteps(result.text),replyMarkers(inspection.normalized+(interventions?'\n'+first.text:''),inspection)].filter(Boolean).join(' ')};
+    result={...result,text:[verdict,teachingSteps(result.text,inspection.checks),replyMarkers(inspection.normalized+(interventions?'\n'+first.text:''),inspection)].filter(Boolean).join(' ')};
   }
   return {...result,verifier:{interventions,verified:inspection.checks.length>0}};
 }

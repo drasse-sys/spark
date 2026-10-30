@@ -19,7 +19,7 @@ async function worker(replies,backup=false){
 const markers='[[VIS: {"type":"tierramme","n":7}]] [[LOGG: pluss | tierovergang | ingen]] [[PROFIL: pluss: dele opp hjalp]] [[PRØV: readInfo | Hva skjedde så?]] [[ORD: tier | ti enere | En tier er ti enere.]] [[STØTTE: S2 | addCarry | riktig | ingen]]';
 test('B-1 correct review fixture retains fact, next step and all valid side effects',async()=>{
   const {data,calls}=await worker(['Riktig! 47+38 er 85. Nå neste steg: hva er 85-20? '+markers+' [[SJEKK: 47+38 | 85 | riktig]]']);
-  assert.equal(calls,1);assert.match(data.text,/Svaret stemmer/);assert.match(data.text,/47\+38 = 85/);assert.match(data.text,/Hva er 85-20\?/);
+  assert.equal(calls,1);assert.match(data.text,/Svaret stemmer/);assert.doesNotMatch(data.text,/47\+38 = 85/);assert.match(data.text,/Hva er 85-20\?/);
   for(const type of ['VIS','LOGG','PROFIL','PRØV','ORD','STØTTE','SJEKK'])assert.ok(data.text.includes('[['+type+':'),type);
   assert.equal(V.extract(data.text).length,1);
 });
@@ -52,6 +52,11 @@ test('B-1 unit injection, mixed malformed markers and arbitrary teaching intents
   const valid=await worker(['[[STEG: {"type":"html","text":"bad-verdict"}]] [[STEG: {"type":"spørsmål","expression":"alert(1)"}]] [[VIS: {"type":"html","html":"bad-visual"}]] [[SJEKK: 2+3 | 5 | riktig]]']);
   assert.ok(!/bad-|alert|STEG|VIS/.test(valid.data.text));
 });
+test('S10 STEG fact equal to checked answer value is not rendered',async()=>{const {data,calls}=await worker(['[[STEG: {"type":"fakta","expression":"80+5","answer":"85"}]] [[STEG: {"type":"fakta","expression":"7+8","answer":"15"}]] [[SJEKK: 47+38 | 76 | feil]]']);assert.equal(calls,1);assert.doesNotMatch(data.text,/80\+5 = 85/);assert.match(data.text,/7\+8 = 15/);});
+test('S10 legacy prose fact revealing checked answer is dropped',async()=>{const {data,calls}=await worker(['Husk at 47+38 er 85. [[SJEKK: 47+38 | 76 | feil]]']);assert.equal(calls,1);assert.doesNotMatch(data.text,/47\+38 = 85/);assert.doesNotMatch(data.text,/85/);});
+test('S10 identical duplicate SJEKK markers collapse without a retry',async()=>{const {data,calls}=await worker(['[[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2 + 3 | 5 | riktig]]']);assert.equal(calls,1);assert.equal(data.verifier.verified,true);assert.equal(data.text.split('[[SJEKK:').length-1,1);});
+test('S10 contradictory duplicate SJEKK markers force reconciliation then neutral fallback',async()=>{const {data,calls}=await worker(['[[OPPGAVE: 2+3]] [[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 6 | feil]]','[[OPPGAVE: 2+3]] [[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 6 | feil]]']);assert.equal(calls,2);assert.equal(data.verifier.verified,false);assert.match(data.text,/La oss se/);assert.doesNotMatch(data.text,/SJEKK/);});
+test('S10 A.inspect dedupes and flags contradictions',async()=>{const r1=A.inspect('[[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 5 | riktig]]');assert.equal(r1.checks.length,1);assert.equal(r1.repair,false);assert.equal(r1.raw,2);const r2=A.inspect('[[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 6 | feil]]');assert.equal(r2.repair,true);});
 test('B-1 backup provider uses the same bounded teaching protocol',async()=>{
   const {data,calls}=await worker(['[[STEG: {"type":"hint","strategy":"deleOpp"}]] '+markers+' [[SJEKK: 47+38 | 75 | feil]]'],true);
   assert.equal(calls,1);assert.equal(data.provider,'groq');assert.match(data.text,/dele tallene/);assert.match(data.text,/\[\[VIS:/);

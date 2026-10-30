@@ -47,8 +47,30 @@
   function inspect(text){
     const markers=[...text.matchAll(/\[\[SJEKK:\s*([^\]]*)\]\]/g)];
     let invalid=/\[\[SJEKK:/i.test(text)&&!markers.length;
-    const checks=markers.map(m=>{const parts=m[1].split('|').map(s=>s.trim());const v=parts.length===3?check(parts[0],parts[1]):{supported:false};const verdict=parts[2];if(!v.supported||!['riktig','feil'].includes(verdict))invalid=true;return {...v,expression:parts[0],answer:parts[1],contradiction:v.supported&&v.ok!==(verdict==='riktig')};});
-    return {checks,repair:invalid||checks.some(c=>c.contradiction)};
+    const raw=markers.length;
+    const checks=[];
+    const seen=Object.create(null);
+    for(const m of markers){
+      const parts=m[1].split('|').map(s=>s.trim());
+      const v=parts.length===3?check(parts[0],parts[1]):{supported:false};
+      const verdict=parts[2];
+      if(!v.supported||!['riktig','feil'].includes(verdict))invalid=true;
+      const norm=parts[0].replace(/\s/g,'').replace(/−/g,'-').replace(/[×·]/g,'*').replace(/[÷:]/g,'/');
+      if(seen[norm]){
+        const prev=seen[norm];
+        if(prev.answer===parts[1] && prev.verdict===verdict){
+          continue;
+        }else{
+          invalid=true;
+          continue;
+        }
+      }
+      const contradiction=v.supported&&v.ok!==(verdict==='riktig');
+      const checkObj={...v,expression:parts[0],answer:parts[1],contradiction};
+      checks.push(checkObj);
+      seen[norm]={answer:parts[1],verdict};
+    }
+    return {checks,repair:invalid||checks.some(c=>c.contradiction),raw};
   }
   root.SparkArithmetic={parse,answer,check,inspect};
 })(globalThis);
