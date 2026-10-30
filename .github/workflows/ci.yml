@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            tests/package-lock.json
+            backend/package-lock.json
+
+      - name: Install test dependencies (lockfile)
+        working-directory: tests
+        run: npm ci
+
+      - name: Install Worker dependencies (lockfile)
+        working-directory: backend
+        run: npm ci
+
+      - name: Node test suite
+        working-directory: tests
+        run: npm test
+
+      - name: JavaScript syntax checks
+        run: |
+          set -e
+          for f in arithmetic.js learning.js visuals.js learning-ui.js sw.js backend/src/index.js tests/*.mjs; do
+            node --check "$f"
+          done
+          node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))"
+
+      - name: Worker dry-run (no deploy)
+        working-directory: backend
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: npx wrangler deploy --dry-run
+
+      - name: Install Chromium (Playwright pinned by lockfile)
+        working-directory: tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser check
+        run: node tests/browser-check.mjs
+
+      - name: Browser learning check
+        run: node tests/browser-learning-check.mjs
