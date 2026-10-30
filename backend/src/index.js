@@ -8,7 +8,6 @@ const RETIRED = /no longer available|not found|NOT_FOUND|is not supported|does n
 const OVERLOADED = /high demand|overloaded|UNAVAILABLE/i;
 const DAILY = /per day|daily limit|requests per day|\bRPD\b|GenerateRequestsPerDay/i;
 const MINUTE = /per minute|requests per minute|tokens per minute|\bRPM\b|\bTPM\b|rate limit/i;
-const NETWORK = /network connection lost|fetch failed|connection (?:reset|refused|closed)/i;
 // One user request may walk the chain for at most this long; each attempt keeps its own 20 s bound.
 const CHAIN_BUDGET_MS = 45000, ATTEMPT_MS = 20000, MIN_ATTEMPT_MS = 5000;
 const PROMPT_VERSION = 'v5.4-c3r1';
@@ -113,7 +112,7 @@ async function readBody(request, limit){
 // Privacy-safe technical diagnosis: a category and numbers only. Never message text, prompts, images, keys or tokens.
 function diagnose(e){
   const status=Number.isInteger(e?.status)?e.status:null;
-  const reason=e?.name==='TimeoutError'||e?.name==='AbortError'?'timeout':e?.blocked?'blocked':/^Tomt svar/.test(e?.message||'')?'empty':status?'http_'+status:e?.name==='TypeError'||NETWORK.test(e?.message||'')?'network':'other';
+  const reason=e?.name==='TimeoutError'||e?.name==='AbortError'?'timeout':e?.blocked?'blocked':/^Tomt svar/.test(e?.message||'')?'empty':status?'http_'+status:e?.network?'network':'other';
   return {reason,status};
 }
 // Intra-Gemini chain policy. Advance only where a different model can plausibly succeed:
@@ -136,6 +135,11 @@ const PROVIDER_TEXT={
   provider_error:'AI-tjenesten svarte ikke. Prøv igjen litt senere.'
 };
 function clientError(kind,e){return e?.spark?e.message:PROVIDER_TEXT[kind]||PROVIDER_TEXT.provider_error;}
+// Only a failure of the outbound request itself is a network failure; local parsing errors are not.
+async function providerFetch(url,init){
+  try{return await fetch(url,init);}
+  catch(e){if(!['TimeoutError','AbortError'].includes(e?.name))try{e.network=true;}catch{}throw e;}
+}
 function logProviderFailure(kind,e,env,backup){
   try{console.log(JSON.stringify({evt:'chat_provider_failure',kind,...diagnose(e),tried:Array.isArray(e?.tried)?e.tried.slice(0,8):undefined,backup:backup||String(env.BACKUP_PROVIDER||'none').toLowerCase(),t:Date.now()}));}catch{}
 }
@@ -477,7 +481,7 @@ function toGemini(messages){
 }
 async function geminiOnce(env, system, messages, model, timeout=ATTEMPT_MS){
   const url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent';
-  const r=await fetch(url,{
+  const r=await providerFetch(url,{
     method:'POST',
     signal:AbortSignal.timeout(timeout),
     headers:{'content-type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
@@ -492,7 +496,8 @@ async function geminiOnce(env, system, messages, model, timeout=ATTEMPT_MS){
     const e=new Error(d.error?.message||('Gemini-feil ('+r.status+')'));
     e.status=r.status; e.details=JSON.stringify(d.error?.details||''); throw e;
   }
-  const text=(d.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('\n').trim();
+  const parts=d.candidates?.[0]?.content?.parts;
+  const text=(Array.isArray(parts)?parts:[]).map(p=>typeof p?.text==='string'?p.text:'').join('\n').trim();
   if(!text){
     const e=new Error('Tomt svar fra Gemini.');
     // A blocked prompt or reply is content-determined; another model would only repeat it.
@@ -540,7 +545,7 @@ async function callBackup(env, system, messages, transcript){
   }else return null;
   if(!key) return null;
   if(hasImage(messages)&&!transcript) throw Object.assign(new Error('Dagskvoten er tom før bildet rakk å bli skrevet av. Skriv oppgaven som tekst, så kan reserven fortsette.'),{spark:true});
-  const r=await fetch(url,{
+  const r=await providerFetch(url,{
     method:'POST',signal:AbortSignal.timeout(20000),headers:{'content-type':'application/json','authorization':'Bearer '+key},
     body:JSON.stringify({model,max_tokens:700,messages:backupMessages(system,messages,transcript)})
   });

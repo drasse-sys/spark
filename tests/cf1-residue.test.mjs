@@ -30,7 +30,7 @@ test('CF1 trust: imported verified evidence cannot manufacture mastery, credit, 
   assert.equal(m.items[0].box,1);assert.equal(m.items[0].due,now);assert.equal(m.items[0].lastAt,null);
   assert.ok(m.sessions.every(s=>s.imported===true));
   // History is retained for display: prior verified events plus any history the file already marked as imported.
-  assert.equal(r.imported.length,4);assert.ok(r.imported.some(e=>e.id==='x2'));assert.equal(r.helped,'Tallinje');assert.equal(m.items[0].word,'house');
+  assert.equal(r.imported.length,4);assert.ok(r.imported.some(e=>e.id==='x2'));assert.equal(r.helped,'');assert.equal(m.items[0].word,'house');
   f.dom.window.close();
 });
 test('CF1 trust: imported history survives reload and re-export, and still carries no authority',()=>{
@@ -84,6 +84,17 @@ test('CF1 clock: returning across a jump to slightly below the earlier peak clam
   const back=put(m,{t:base-6*3600000,k:'cold',sid:'c1'});assert.equal(back.t,base);assert.equal(back.delayed,false);
   assert.equal(put(m,{t:base+DAY-7*3600000,k:'cold',sid:'c2'}).delayed,false);
 });
+test('CF1 clock: a stale far-future observation cannot block verified delay credit after the clock is corrected',()=>{
+  const m=L.empty();put(m,{t:base});put(m,{t:base+400*DAY,sid:'o',verified:false});
+  const first=put(m,{t:base+DAY,k:'cold',sid:'c1'});assert.equal(first.delayed,false);
+  const second=put(m,{t:base+2*DAY,k:'cold',sid:'c2'});assert.equal(second.delayed,true);assert.equal(m.totals.independentCold,1);
+  const reloaded=L.normalizeMemory(plain(m));assert.equal(put(reloaded,{t:base+3*DAY,k:'cold',sid:'c3'}).delayed,true);
+});
+test('CF1 clock: a backwards clock may surface a long-spaced review early but grants no credit for it',()=>{
+  const m=L.empty();for(const [n,sid] of [[0,'a'],[2,'b'],[10,'c'],[40,'d'],[100,'e']])put(m,{t:base+n*DAY,k:n?'cold':'task',sid});
+  assert.equal(m.skills.add1.box,5);const cold=m.totals.cold;assert.deepEqual(plain(L.due(m,base+100*DAY-2*DAY)),['add1']);
+  assert.equal(put(m,{t:base+98*DAY,k:'cold',sid:'f'}).delayed,false);assert.equal(m.totals.cold,cold);
+});
 test('CF1 clock: an observation crossing a clock jump also restarts the retention interval',()=>{
   const m=L.empty();put(m,{t:base});put(m,{t:base+2*DAY,k:'cold',sid:'s2'});assert.equal(m.skills.add1.firstColdAt,base+2*DAY);
   put(m,{t:base-5*YEAR,sid:'o',verified:false});assert.equal(m.skills.add1.firstColdAt,null);
@@ -113,21 +124,23 @@ const fail={
   blockedPrompt:()=>Response.json({promptFeedback:{blockReason:'SAFETY'}}),
   blockedReply:()=>Response.json({candidates:[{finishReason:'SAFETY'}]})
 };
-const advance=[['5xx 500',fail.http(500,'Internal')],['5xx 502',fail.http(502,'Bad gateway')],['5xx 503',fail.http(503,'UNAVAILABLE')],['5xx 504',fail.http(504,'Deadline')],['429 overloaded',fail.http(429,'The model is experiencing high demand')],['retired 404',fail.http(404,'models/x is not found')],['timeout',fail.timeout],['network',fail.network],['network lost',fail.lost],['empty',fail.empty],['invalid json',fail.invalid]];
+const blockedReasons=['PROHIBITED_CONTENT','BLOCKLIST','SPII','RECITATION'].map(reason=>['blocked '+reason,()=>Response.json({candidates:[{finishReason:reason}]}),502,'provider_error']);
+const parsed=(parts)=>()=>Response.json({candidates:[{content:{parts}}]});
+const advance=[['malformed parts',parsed([null])],['non-array parts',parsed({text:'x'})],['5xx 500',fail.http(500,'Internal')],['5xx 502',fail.http(502,'Bad gateway')],['5xx 503',fail.http(503,'UNAVAILABLE')],['5xx 504',fail.http(504,'Deadline')],['429 overloaded',fail.http(429,'The model is experiencing high demand')],['retired 404',fail.http(404,'models/x is not found')],['timeout',fail.timeout],['network',fail.network],['network lost',fail.lost],['empty',fail.empty],['invalid json',fail.invalid]];
 for(const [label,first] of advance)test('CF1 provider: '+label+' advances to the next Gemini model',async()=>{
   let calls=0;const b=backend(async()=>++calls===1?first():success()),{env}=environment();
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'d')),env);
   assert.equal(r.status,200,label);assert.equal(calls,2,label);assert.equal((await r.json()).model,b.api.GEMINI_CHAIN[1]);
 });
 const stop=[['401 auth',fail.http(401,'API key not valid'),502,'provider_error'],['403 permission',fail.http(403,'PERMISSION_DENIED'),502,'provider_error'],['429 rate',fail.http(429,'Quota exceeded'),429,'minute_quota'],['429 daily',fail.http(429,'requests per day'),429,'daily_quota'],['400 bad request',fail.http(400,'Invalid argument'),400,'provider_error'],['413',fail.http(413,'Request too large'),413,'provider_error'],['blocked prompt',fail.blockedPrompt,502,'provider_error'],['blocked reply',fail.blockedReply,502,'provider_error']];
-for(const [label,first,status,kind] of stop)test('CF1 provider: '+label+' fails fast without walking the chain',async()=>{
+for(const [label,first,status,kind] of [...stop,...blockedReasons])test('CF1 provider: '+label+' fails fast without walking the chain',async()=>{
   let calls=0;const b=backend(async()=>{calls++;return first();}),{env}=environment();
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'d')),env);const data=await r.json();
   assert.equal(calls,1,label);assert.equal(r.status,status,label);assert.equal(data.kind,kind,label);
 });
 test('CF1 provider: classifier verdicts are explicit for every branch',()=>{
   const {api}=backend(()=>{});const e=(props,message='')=>Object.assign(new Error(message),props);
-  const cases=[[e({status:503}),true],[e({status:500}),true],[e({status:404},'model not found'),true],[e({name:'TimeoutError'}),true],[Object.assign(new TypeError('fetch failed')),true],[e({},'Tomt svar fra Gemini.'),true],
+  const cases=[[e({status:503}),true],[e({status:500}),true],[e({status:404},'model not found'),true],[e({name:'TimeoutError'}),true],[e({network:true},'fetch failed'),true],[new TypeError("Cannot read properties of null (reading 'text')"),false],[e({},'Tomt svar fra Gemini.'),true],
     [e({status:401}),false],[e({status:403}),false],[e({status:429},'Quota exceeded'),false],[e({status:400},'Invalid argument'),false],[e({status:404},'Requested entity was not found'),true],[e({status:400},'field is not supported'),false],[e({blocked:true},'Tomt svar fra Gemini.'),false],[e({status:401},'model overloaded'),false],[e({},'something else'),false]];
   for(const [error,expected] of cases)assert.equal(api.chainAdvance(error),expected,String(error.status)+' '+error.message+' '+error.name);
 });
@@ -147,7 +160,7 @@ test('CF1 provider: client bodies carry Spark text only; logs stay content-free 
     assert.ok(JSON.parse(line).tried.every(t=>/^[\w.-]+:(timeout|network|empty|blocked|http_\d+|other)$/.test(t)));
   }
 });
-test('CF1 provider: Spark-authored backup guidance still reaches the child',async()=>{
+test('CF1 provider: Spark-authored backup guidance passes through the Worker body',async()=>{
   const b=backend(async()=>Response.json({error:{message:'daily limit'}},{status:429})),{env}=environment({BACKUP_PROVIDER:'groq',GROQ_API_KEY:'fixture-groq-key'});
   const r=await b.worker.fetch(request('/chat',body({messages:[{role:'user',content:[{type:'image',source:{type:'base64',media_type:'image/jpeg',data:'YWJj'}}]}]}),await b.api.makeToken(env,'d')),env);
   assert.ok((await r.json()).error.includes('Skriv oppgaven som tekst'));

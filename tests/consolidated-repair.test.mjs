@@ -38,7 +38,8 @@ test('B-1 reconciliation retries once, preserves missing side effects and maximu
 });
 for(const retry of [Error('private provider error'),'[[SJEKK: 47+38 | 75 | riktig]]','Jeg vet ikke.'])test('B-1 failed reconciliation has bounded safe fallback '+String(retry),async()=>{
   const {data,calls}=await worker(['[[OPPGAVE: 47+38]] [[SJEKK: 47+38 | 75 | riktig]]',retry]);
-  assert.equal(calls,2);assert.equal(data.verifier.verified,false);assert.match(data.text,/La oss se/);assert.match(data.text,/OPPGAVE: 47\+38/);assert.ok(!/private|SJEKK|Kontroller/.test(data.text));
+  // A transport failure on the single reconciliation retry walks the bounded model chain once (CF1 policy).
+  assert.equal(calls,retry instanceof Error?1+6:2);assert.equal(data.verifier.verified,false);assert.match(data.text,/La oss se/);assert.match(data.text,/OPPGAVE: 47\+38/);assert.ok(!/private|SJEKK|Kontroller/.test(data.text));
 });
 test('B-1 structured-only response retains valid markers without requiring prose',async()=>{
   const {data,calls}=await worker([markers+' [[SJEKK: 47+38 | 85 | riktig]]']);assert.equal(calls,1);assert.match(data.text,/Svaret stemmer/);assert.match(data.text,/\[\[PRØV:/);assert.match(data.text,/\[\[ORD:/);

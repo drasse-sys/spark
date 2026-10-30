@@ -14,7 +14,7 @@ test('frontend, Worker, service-worker syntax and manifest/TOML parse; static pa
   assert.equal(config.vars.ALLOWED_ORIGINS,'https://drasse-sys.github.io');assert.equal(config.ratelimits.length,4);assert.equal(new Set(config.ratelimits.map(r=>r.namespace_id)).size,4);
   for(const r of config.ratelimits)assert.ok([10,60].includes(r.simple.period));
   // Persisted Worker logs carry only the Worker's own content-free lines: no invocation logs (request metadata), no traces.
-  assert.deepEqual(config.observability,{logs:{enabled:true,invocation_logs:false,head_sampling_rate:1}});
+  assert.deepEqual(config.observability,{logs:{enabled:true,invocation_logs:false,head_sampling_rate:1},traces:{enabled:false}});
   assert.ok(!/user-scalable=no/.test(html));assert.match(html,/aria-label="Svaret ditt"/);
 });
 test('no provider key formats or credential assignments in static frontend files',()=>{

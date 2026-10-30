@@ -18,6 +18,9 @@ enabled = true
 invocation_logs = false
 head_sampling_rate = 1
 
+[observability.traces]
+enabled = false
+
 [secrets]
 required = [ "GEMINI_API_KEY", "FAMILY_CODE", "DEVICE_SIGNING_SECRET" ]
 
