@@ -89,6 +89,8 @@
   // A short round of distinct items (no repeated key) from one skill.
   function round(id,seed=0,count=3){const out=[],seen=new Set();for(let k=0;k<count*20&&out.length<count;k++){const item=generate(id,Math.trunc(seed)+k*11,out.at(-1)?.key||'');if(item&&!seen.has(item.key)){seen.add(item.key);out.push(item);}}return out;}
   function checkItem(item,input){
+    // Only money skills accept a trailing currency unit; the numeric value alone is checked.
+    if(typeof input==='string'&&(item.skill==='money'||item.skill==='change'))input=input.replace(/(?<=\d)\s*(?:kr|kroner)\.?\s*$/i,'');
     if(item.expression)return root.SparkArithmetic.check(item.expression,input);
     if(item.skill?.startsWith('clock'))return {supported:true,ok:/^\d{1,2}:\d{2}$/.test(input.trim())&&input.trim().padStart(5,'0')===item.answer};
     if(item.word)return {supported:true,ok:input.trim().normalize('NFC').toLocaleLowerCase('nb')===item.answer.normalize('NFC').toLocaleLowerCase('nb')};
