@@ -1127,6 +1127,9 @@ function history_guard(){
   });
 }
 
+// Expire abandoned sessions of every child, not only the opened one (aggregates are kept by loadSession).
+function sweepSessions(){for(let i=0;i<kids.length;i++)loadSession(i);}
+sweepSessions();
 /* PWA: registrer service worker hvis appen kjøres fra en ekte nettadresse */
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
   navigator.serviceWorker.register('sw.js', {updateViaCache:'none'}).catch(()=>{});
