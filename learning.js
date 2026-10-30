@@ -72,8 +72,8 @@
         case 'sub': {const x=id==='sub1'?a+b:id==='subBorrow'?30+a:40+b;const y=id==='sub1'?b:id==='subBorrow'?10+a+1:10+(b%4);expression=`${x}-${y}`;break;}
         case 'times': {const tables=id==='times2510'?[2,5,10]:id==='times34'?[3,4]:[6,7,8,9];expression=`${tables[n%tables.length]}*${b}`;break;}
         case 'divide':expression=`${a*b}/${b}`;break;
-        case 'double':expression=`${a}+${a}`;break;
-        case 'half':expression=`${a*2}/2`;break;
+        case 'double':{const w=n%20+1;expression=`${w}+${w}`;break;}
+        case 'half':expression=`${(n%20+1)*2}/2`;break;
         case 'friends':{const total=id==='friends10'?10:100;const part=id==='friends10'?a:a*10;expression=`${total}-${part}`;prompt=`${part} + ? = ${total}`;break;}
         case 'number':{const total=id==='number20'?a+10:id==='number100'?a*10+b:a*100+b*10;answer=String(total);prompt=`Skriv tallet: ${id==='number1000'?a+' hundrere og '+b+' tiere':Math.floor(total/10)+' tiere og '+total%10+' enere'}`;break;}
         case 'clock':{const h=a,m=id==='clockHour'?[0,30][n%2]:id==='clockQuarter'?[15,45][n%2]:(n%12)*5;answer=`${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;prompt='Hva viser klokka? Skriv timer:minutter.';visual={type:'klokke',hour:h,minute:m};break;}
@@ -86,6 +86,8 @@
     }
     return null;
   }
+  // A short round of distinct items (no repeated key) from one skill.
+  function round(id,seed=0,count=3){const out=[],seen=new Set();for(let k=0;k<count*20&&out.length<count;k++){const item=generate(id,Math.trunc(seed)+k*11,out.at(-1)?.key||'');if(item&&!seen.has(item.key)){seen.add(item.key);out.push(item);}}return out;}
   function checkItem(item,input){
     if(item.expression)return root.SparkArithmetic.check(item.expression,input);
     if(item.skill?.startsWith('clock'))return {supported:true,ok:/^\d{1,2}:\d{2}$/.test(input.trim())&&input.trim().padStart(5,'0')===item.answer};
@@ -161,5 +163,5 @@
     const r=memory.skills[t.skill];
     return JSON.stringify({task:t.id,skill:t.skill,s:t.s,state:state(r),kind:session.check?.kind||'task',helped:r?.helped||'',reading:session.readingGoal||''}).slice(0,300);
   }
-  root.SparkLearning={DAY,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,checkItem,activity,boundSession,aggregate,normalizeMemory,prune,migrate,context};
+  root.SparkLearning={DAY,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,round,checkItem,activity,boundSession,aggregate,normalizeMemory,prune,migrate,context};
 })(globalThis);

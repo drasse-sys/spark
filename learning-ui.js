@@ -122,7 +122,7 @@ function preparePractice(){
 function startPractice(type){
   const memory=kid().learning ||= L.empty(),now=Date.now();
   let items=type==='review'?L.due(memory,now).map((id,i)=>L.generate(id,Math.floor(now/L.DAY)+i)):
-    type==='words'?memory.items.slice(0,3).map(wordItem):[0,1,2].map(n=>L.generate('times2510',Math.floor(now/1000)+n*11));
+    type==='words'?memory.items.slice(0,3).map(wordItem):L.round('times2510',Math.floor(now/1000),3);
   if(type==='review')items=[...items,...L.dueWords(memory,now).map(wordItem)].slice(0,3);
   items=items.filter(Boolean);if(!items.length){startNotice='Ingen oppgaver å hente fram akkurat nå. Du kan fortsette med leksa.';render();return;}
   if(!preparePractice())return;
