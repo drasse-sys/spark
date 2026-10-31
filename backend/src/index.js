@@ -11,6 +11,8 @@ const MINUTE = /per minute|requests per minute|tokens per minute|\bRPM\b|\bTPM\b
 // One user request may walk the chain for at most this long; each attempt keeps its own 20 s bound.
 const CHAIN_BUDGET_MS = 45000, ATTEMPT_MS = 20000, MIN_ATTEMPT_MS = 5000;
 const PROMPT_VERSION = 'v5.4-c3r1';
+// Worker release identity reported by /health. Bump this string (<tag>-<yyyymmdd>) in every release that deploys the Worker.
+const GENERATION = 'rh1-20261031';
 const enc = new TextEncoder();
 
 function json(data, status=200, extra={}){
@@ -668,7 +670,7 @@ export default {
     const url=new URL(request.url);
 
     if(url.pathname==='/health' && request.method==='GET'){
-      return json({ok:true,service:'spark-api',backup:String(env.BACKUP_PROVIDER||'none'),promptVersion:PROMPT_VERSION,generation:'c3r1-20261022'},200,c.headers);
+      return json({ok:true,service:'spark-api',backup:String(env.BACKUP_PROVIDER||'none'),promptVersion:PROMPT_VERSION,generation:GENERATION},200,c.headers);
     }
 
     if(url.pathname==='/pair' && request.method==='POST'){

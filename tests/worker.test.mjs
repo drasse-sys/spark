@@ -131,3 +131,11 @@ test('S10 provider failures are logged as privacy-safe categories and exposed as
     for(const forbidden of [secret,'fixture-provider-key','fixture-family-code','fixture-signing-key','Bearer','data:image'])assert.ok(!line.includes(forbidden),label+' leaked '+forbidden);
   }
 });
+test('/health reports the Worker generation constant, no secrets',async()=>{
+  const b=backend(()=>{throw Error('provider');}),{env}=environment();
+  const r=await b.worker.fetch(request('/health'),env);assert.equal(r.status,200);
+  const d=await r.json();const src=(await import('node:fs')).readFileSync(new URL('../backend/src/index.js',import.meta.url),'utf8');
+  assert.equal(d.generation,/const GENERATION = '([^']+)'/.exec(src)[1]);
+  assert.match(d.generation,/^[a-z0-9]+-\d{8}$/);assert.notEqual(d.generation,'c3r1-20261022');
+  assert.deepEqual(Object.keys(d).sort(),['backup','generation','ok','promptVersion','service']);
+});
