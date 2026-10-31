@@ -75,12 +75,12 @@ for(const status of [400,401,403,429]) test('ordinary provider '+status+' does n
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'device')),env);
   assert.equal(calls,1);assert.equal(r.status,[401,403].includes(status)?502:status);
 });
-test('provider secrets are redacted from both message and details',async()=>{
+test('provider messages and details (and so their secrets) never reach the client',async()=>{
   const {env}=environment();const secrets=['GEMINI_API_KEY','FAMILY_CODE','DEVICE_SIGNING_SECRET','OPENROUTER_API_KEY','GROQ_API_KEY'];
   env.OPENROUTER_API_KEY='fixture-router-key';env.GROQ_API_KEY='fixture-groq-key';
   const b=backend(async()=>Response.json({error:{message:secrets.map(k=>env[k]).join(' '),details:secrets.map(k=>env[k])}},{status:400}));
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'device')),env);const text=await r.text();
-  for(const key of secrets)assert.ok(!text.includes(env[key]),key);assert.ok(text.includes('[redacted]'));
+  for(const key of secrets)assert.ok(!text.includes(env[key]),key);assert.equal(JSON.parse(text).error,'AI-tjenesten svarte ikke. Prøv igjen litt senere.');assert.ok(!('details' in JSON.parse(text)));
 });
 for(const provider of ['openrouter','groq']) test('daily quota uses configured '+provider+' text backup only',async()=>{
   const sent=[];const b=backend(async(url,init)=>{sent.push({url,body:JSON.parse(init.body)});return sent.length===1?Response.json({error:{message:'requests per day quota'}},{status:429}):Response.json({choices:[{message:{content:'Vi fortsetter.'}}]});});
@@ -120,4 +120,14 @@ test('network and backup errors are controlled; backup error secrets are redacte
   let calls=0;const b=backend(async()=>{if(++calls===1)return Response.json({error:{message:'daily limit'}},{status:429});return Response.json({error:{message:'invalid '+env.GROQ_API_KEY}},{status:401});});
   const r=await b.worker.fetch(request('/chat',body(),await b.api.makeToken(env,'d')),env);assert.equal(r.status,502);assert.ok(!(await r.text()).includes(env.GROQ_API_KEY));
   const net=backend(async()=>{throw Error('Network failure');});const nr=await net.worker.fetch(request('/chat',body(),await net.api.makeToken(env,'d')),env);assert.equal(nr.status,502);
+});
+test('S10 provider failures are logged as privacy-safe categories and exposed as a reason',async()=>{
+  const secret='Hjelp meg med leksa';
+  for(const [label,fail,reason,status] of [['timeout',()=>{throw new DOMException('t','TimeoutError');},'timeout',502],['network',()=>{throw new TypeError('fetch failed '+secret);},'network',502],['empty',()=>Response.json({candidates:[{content:{parts:[{text:''}]}}]}),'empty',502],['http',()=>Response.json({error:{message:'bad '+secret}},{status:400}),'http_400',400]]){
+    const b=backend(async()=>fail());const {env}=environment();
+    const r=await b.worker.fetch(request('/chat',body({mode:'matte'}),await b.api.makeToken(env,'d')),env);const data=await r.json();
+    assert.equal(r.status,status,label);assert.equal(data.kind,'provider_error',label);assert.equal(data.reason,reason,label);
+    const line=b.logs.find(l=>l.includes('chat_provider_failure'));assert.ok(line,label);const rec=JSON.parse(line);assert.equal(rec.reason,reason);assert.equal(rec.kind,'provider_error');
+    for(const forbidden of [secret,'fixture-provider-key','fixture-family-code','fixture-signing-key','Bearer','data:image'])assert.ok(!line.includes(forbidden),label+' leaked '+forbidden);
+  }
 });

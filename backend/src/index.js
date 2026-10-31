@@ -8,6 +8,8 @@ const RETIRED = /no longer available|not found|NOT_FOUND|is not supported|does n
 const OVERLOADED = /high demand|overloaded|UNAVAILABLE/i;
 const DAILY = /per day|daily limit|requests per day|\bRPD\b|GenerateRequestsPerDay/i;
 const MINUTE = /per minute|requests per minute|tokens per minute|\bRPM\b|\bTPM\b|rate limit/i;
+// One user request may walk the chain for at most this long; each attempt keeps its own 20 s bound.
+const CHAIN_BUDGET_MS = 45000, ATTEMPT_MS = 20000, MIN_ATTEMPT_MS = 5000;
 const PROMPT_VERSION = 'v5.4-c3r1';
 const enc = new TextEncoder();
 
@@ -106,6 +108,40 @@ async function readBody(request, limit){
     for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
     return {body:JSON.parse(new TextDecoder().decode(bytes))};
   }catch{return {status:400,error:'Ugyldig JSON-forespørsel.'};}
+}
+// Privacy-safe technical diagnosis: a category and numbers only. Never message text, prompts, images, keys or tokens.
+function diagnose(e){
+  const status=Number.isInteger(e?.status)?e.status:null;
+  const reason=e?.name==='TimeoutError'||e?.name==='AbortError'?'timeout':e?.blocked?'blocked':/^Tomt svar/.test(e?.message||'')?'empty':status?'http_'+status:e?.network?'network':'other';
+  return {reason,status};
+}
+// Intra-Gemini chain policy. Advance only where a different model can plausibly succeed:
+// per-model capacity (5xx/overload), a retired model, a stalled model (timeout), a dropped connection, or an empty reply.
+// Stop on what another model would repeat or what asks us to back off: auth/permission, rate/quota (429),
+// deterministic 4xx and safety blocks of the prompt or reply.
+function chainAdvance(e){
+  if([401,403].includes(e?.status))return false;
+  const message=e?.message||'';
+  if(OVERLOADED.test(message)||[500,502,503,504].includes(e?.status))return true;
+  if(RETIRED.test(message)&&(e?.status===404||/\bmodels?\b/i.test(message)))return true;
+  if(e?.status===429)return false;
+  if(Number.isInteger(e?.status))return false;
+  return ['timeout','empty','network'].includes(diagnose(e).reason);
+}
+// Client-facing text for provider failures is Spark's own; provider messages and details stay on the server.
+const PROVIDER_TEXT={
+  daily_quota:'Dagskvoten hos AI-tjenesten er brukt opp.',
+  minute_quota:'For mange forespørsler på kort tid. Vent litt og prøv igjen.',
+  provider_error:'AI-tjenesten svarte ikke. Prøv igjen litt senere.'
+};
+function clientError(kind,e){return e?.spark?e.message:PROVIDER_TEXT[kind]||PROVIDER_TEXT.provider_error;}
+// Only a failure of the outbound request itself is a network failure; local parsing errors are not.
+async function providerFetch(url,init){
+  try{return await fetch(url,init);}
+  catch(e){if(!['TimeoutError','AbortError'].includes(e?.name))try{e.network=true;}catch{}throw e;}
+}
+function logProviderFailure(kind,e,env,backup){
+  try{console.log(JSON.stringify({evt:'chat_provider_failure',kind,...diagnose(e),tried:Array.isArray(e?.tried)?e.tried.slice(0,8):undefined,backup:backup||String(env.BACKUP_PROVIDER||'none').toLowerCase(),t:Date.now()}));}catch{}
 }
 function providerStatus(e){
   // Upstream credential failures must not masquerade as an expired device token.
@@ -443,11 +479,11 @@ function toGemini(messages){
     }).filter(Boolean)
   }));
 }
-async function geminiOnce(env, system, messages, model){
+async function geminiOnce(env, system, messages, model, timeout=ATTEMPT_MS){
   const url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent';
-  const r=await fetch(url,{
+  const r=await providerFetch(url,{
     method:'POST',
-    signal:AbortSignal.timeout(20000),
+    signal:AbortSignal.timeout(timeout),
     headers:{'content-type':'application/json','x-goog-api-key':env.GEMINI_API_KEY},
     body:JSON.stringify({
       system_instruction:{parts:[{text:system}]},
@@ -455,26 +491,30 @@ async function geminiOnce(env, system, messages, model){
       generationConfig:{maxOutputTokens:900,temperature:0.8,thinkingConfig:{thinkingLevel:'low'}}
     })
   });
-  const d=await r.json().catch(()=>({}));
+  const parsed=await r.json().catch(()=>({})),d=parsed&&typeof parsed==='object'?parsed:{};
   if(!r.ok || d.error){
     const e=new Error(d.error?.message||('Gemini-feil ('+r.status+')'));
     e.status=r.status; e.details=JSON.stringify(d.error?.details||''); throw e;
   }
-  const text=(d.candidates?.[0]?.content?.parts||[]).map(p=>p.text||'').join('\n').trim();
-  if(!text) throw new Error('Tomt svar fra Gemini.');
+  const parts=d.candidates?.[0]?.content?.parts;
+  const text=(Array.isArray(parts)?parts:[]).map(p=>typeof p?.text==='string'?p.text:'').join('\n').trim();
+  if(!text){
+    const e=new Error('Tomt svar fra Gemini.');
+    // A blocked prompt or reply is content-determined; another model would only repeat it.
+    e.blocked=!!d.promptFeedback?.blockReason||['SAFETY','PROHIBITED_CONTENT','BLOCKLIST','SPII','RECITATION'].includes(d.candidates?.[0]?.finishReason);
+    throw e;
+  }
   return text;
 }
-async function callGemini(env, system, messages){
-  let last;
+async function callGemini(env, system, messages, clock=Date.now){
+  let last;const tried=[];const deadline=clock()+CHAIN_BUDGET_MS;
   for(const model of GEMINI_CHAIN){
-    try{return {text:await geminiOnce(env,system,messages,model),model};}
+    const remaining=deadline-clock();
+    if(last&&remaining<MIN_ATTEMPT_MS) break;
+    try{return {text:await geminiOnce(env,system,messages,model,Math.min(ATTEMPT_MS,remaining)),model};}
     catch(e){
-      last=e;
-      if([401,403].includes(e.status)) throw e;
-      // utgått modell eller midlertidig overbelastet -> prøv neste i kjeden
-      const overloaded=[500,503,504].includes(e.status) || OVERLOADED.test(e.message||'');
-      const retired=RETIRED.test(e.message||'') && (e.status===404 || /\bmodels?\b/i.test(e.message||''));
-      if(!retired && !overloaded) throw e;
+      last=e;tried.push(model+':'+diagnose(e).reason);try{e.tried=tried;}catch{}
+      if(!chainAdvance(e)) throw e;
     }
   }
   throw last||new Error('Ingen Gemini-modell svarte.');
@@ -504,8 +544,8 @@ async function callBackup(env, system, messages, transcript){
     model=env.GROQ_MODEL||'openai/gpt-oss-120b';
   }else return null;
   if(!key) return null;
-  if(hasImage(messages)&&!transcript) throw new Error('Dagskvoten er tom før bildet rakk å bli skrevet av. Skriv oppgaven som tekst, så kan reserven fortsette.');
-  const r=await fetch(url,{
+  if(hasImage(messages)&&!transcript) throw Object.assign(new Error('Dagskvoten er tom før bildet rakk å bli skrevet av. Skriv oppgaven som tekst, så kan reserven fortsette.'),{spark:true});
+  const r=await providerFetch(url,{
     method:'POST',signal:AbortSignal.timeout(20000),headers:{'content-type':'application/json','authorization':'Bearer '+key},
     body:JSON.stringify({model,max_tokens:700,messages:backupMessages(system,messages,transcript)})
   });
@@ -521,7 +561,7 @@ const TEACHING_HINTS=Object.freeze({
   deleOpp:'Prøv å dele tallene i tiere og enere.',veksle:'Ti enere kan byttes mot én tier.',
   motsatt:'Du kan sjekke med motsatt regneart.',forklare:'Kan du forklare ett steg med egne ord?'
 });
-function teachingSteps(text){
+function teachingSteps(text,checks=[]){
   const steps=[];
   const add=v=>{
     if(!v||typeof v!=='object'||Array.isArray(v))return;
@@ -529,7 +569,17 @@ function teachingSteps(text){
     if(v.type==='hint'&&Object.hasOwn(TEACHING_HINTS,v.strategy))line=TEACHING_HINTS[v.strategy];
     if(typeof v.expression==='string'&&SparkArithmetic.parse(v.expression)){
       if(v.type==='spørsmål')line='Hva er '+v.expression.trim()+'?';
-      if(v.type==='fakta'&&SparkArithmetic.check(v.expression,v.answer).ok)line=v.expression.trim()+' = '+v.answer.trim()+'.';
+      if(v.type==='fakta'&&SparkArithmetic.check(v.expression,v.answer).ok){
+        const a=SparkArithmetic.parse(v.expression);
+        let skip=false;
+        for(const c of checks){
+          if(c.supported===true){
+            const b=SparkArithmetic.parse(c.expression);
+            if(a&&b&&a.n===b.n&&a.d===b.d){skip=true;break;}
+          }
+        }
+        if(!skip)line=v.expression.trim()+' = '+v.answer.trim()+'.';
+      }
     }
     if(line&&!steps.includes(line)&&steps.length<3&&(!line.includes('?')||!steps.some(s=>s.includes('?'))))steps.push(line);
   };
@@ -555,7 +605,7 @@ function inspectReply(text){
     return '[[SJEKK: '+parts.join(' | ')+']]';
   });
   const inspection=SparkArithmetic.inspect(normalized);
-  if((text.match(/\[\[SJEKK:/gi)||[]).length!==inspection.checks.length||inspection.checks.length>4)inspection.repair=true;
+  if((text.match(/\[\[SJEKK:/gi)||[]).length!==inspection.raw||inspection.checks.length>4)inspection.repair=true;
   return {...inspection,normalized};
 }
 function replyMarkers(text,inspection){
@@ -604,7 +654,7 @@ async function checkedReply(first, retry){
   if(inspection.checks.length){
     const verdict=inspection.checks.every(c=>c.ok)?'Svaret stemmer med regnestykket.':'Sjekk regnestykket en gang til. Du kan velge et hint.';
     // An accepted numeric marker licenses neither arbitrary prose nor arbitrary HTML.
-    result={...result,text:[verdict,teachingSteps(result.text),replyMarkers(inspection.normalized+(interventions?'\n'+first.text:''),inspection)].filter(Boolean).join(' ')};
+    result={...result,text:[verdict,teachingSteps(result.text,inspection.checks),replyMarkers(inspection.normalized+(interventions?'\n'+first.text:''),inspection)].filter(Boolean).join(' ')};
   }
   return {...result,verifier:{interventions,verified:inspection.checks.length>0}};
 }
@@ -658,10 +708,12 @@ export default {
             if(b) return json(await checkedReply(b,note=>callBackup(env,system+'\n'+note,body.messages,body.transcript||'')),200,c.headers);
           }
           const kind=q.minute?'minute_quota':(q.daily?'daily_quota':'provider_error');
-          return json({error:redactSecrets(e.message||'AI-feil',env),kind,details:redactSecrets(e.details||'',env)},providerStatus(e),c.headers);
+          logProviderFailure(kind,e,env);
+          return json({error:clientError(kind,e),kind,reason:diagnose(e).reason},providerStatus(e),c.headers);
         }
       }catch(e){
-        return json({error:redactSecrets(e.message||'Reserve-feil',env),kind:'provider_error'},providerStatus(e),c.headers);
+        logProviderFailure('provider_error',e,env);
+        return json({error:redactSecrets(clientError('provider_error',e),env),kind:'provider_error',reason:diagnose(e).reason},providerStatus(e),c.headers);
       }
     }
 

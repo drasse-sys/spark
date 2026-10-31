@@ -10,10 +10,11 @@ export const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 export const voice = (lang, name=lang, extra={}) => ({lang, name, voiceURI:name, default:false, localService:false, ...extra});
 export const body = (extra={}) => ({mode:'lekse',age:8,name:'Barn',interests:'fotball',notes:[],sessionState:'',transcript:'',messages:[{role:'user',content:'Hjelp meg med leksa'}],...extra});
 export function backend(fetch){
-  const ctx={crypto:webcrypto,TextEncoder,TextDecoder,Request,Response,URL,AbortSignal,atob,btoa,fetch};
+  const logs=[];
+  const ctx={logs,console:{log:(...a)=>logs.push(a.join(' '))},crypto:webcrypto,TextEncoder,TextDecoder,Request,Response,URL,AbortSignal,atob,btoa,fetch};
   vm.createContext(ctx);
   vm.runInContext(read('arithmetic.js')+'\n'+read('visuals.js')+'\n'+read('backend/src/index.js').replace(/^import .*;$/gm,'').replace('export default {','globalThis.worker = {')+
-    ';globalThis.api={makeToken,verifyToken,b64url,hmac,buildSystemPrompt,validatePayload,GEMINI_CHAIN};',ctx);
+    ';globalThis.api={makeToken,verifyToken,b64url,hmac,buildSystemPrompt,validatePayload,GEMINI_CHAIN,callGemini,chainAdvance,CHAIN_BUDGET_MS};',ctx);
   return ctx;
 }
 export function environment(extra={}){

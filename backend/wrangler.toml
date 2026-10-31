@@ -11,6 +11,16 @@ BACKUP_PROVIDER = "none"
 OPENROUTER_MODEL = "openrouter/free"
 GROQ_MODEL = "openai/gpt-oss-120b"
 
+# Persist only the Worker's own console lines (the content-free "chat_provider_failure" record).
+# Invocation logs (request metadata) and traces stay off; request/response bodies are never logged.
+[observability.logs]
+enabled = true
+invocation_logs = false
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = false
+
 [secrets]
 required = [ "GEMINI_API_KEY", "FAMILY_CODE", "DEVICE_SIGNING_SECRET" ]
 

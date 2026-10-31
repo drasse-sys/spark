@@ -19,7 +19,7 @@ async function worker(replies,backup=false){
 const markers='[[VIS: {"type":"tierramme","n":7}]] [[LOGG: pluss | tierovergang | ingen]] [[PROFIL: pluss: dele opp hjalp]] [[PRØV: readInfo | Hva skjedde så?]] [[ORD: tier | ti enere | En tier er ti enere.]] [[STØTTE: S2 | addCarry | riktig | ingen]]';
 test('B-1 correct review fixture retains fact, next step and all valid side effects',async()=>{
   const {data,calls}=await worker(['Riktig! 47+38 er 85. Nå neste steg: hva er 85-20? '+markers+' [[SJEKK: 47+38 | 85 | riktig]]']);
-  assert.equal(calls,1);assert.match(data.text,/Svaret stemmer/);assert.match(data.text,/47\+38 = 85/);assert.match(data.text,/Hva er 85-20\?/);
+  assert.equal(calls,1);assert.match(data.text,/Svaret stemmer/);assert.doesNotMatch(data.text,/47\+38 = 85/);assert.match(data.text,/Hva er 85-20\?/);
   for(const type of ['VIS','LOGG','PROFIL','PRØV','ORD','STØTTE','SJEKK'])assert.ok(data.text.includes('[['+type+':'),type);
   assert.equal(V.extract(data.text).length,1);
 });
@@ -38,7 +38,8 @@ test('B-1 reconciliation retries once, preserves missing side effects and maximu
 });
 for(const retry of [Error('private provider error'),'[[SJEKK: 47+38 | 75 | riktig]]','Jeg vet ikke.'])test('B-1 failed reconciliation has bounded safe fallback '+String(retry),async()=>{
   const {data,calls}=await worker(['[[OPPGAVE: 47+38]] [[SJEKK: 47+38 | 75 | riktig]]',retry]);
-  assert.equal(calls,2);assert.equal(data.verifier.verified,false);assert.match(data.text,/La oss se/);assert.match(data.text,/OPPGAVE: 47\+38/);assert.ok(!/private|SJEKK|Kontroller/.test(data.text));
+  // A transport failure on the single reconciliation retry walks the bounded model chain once (CF1 policy).
+  assert.equal(calls,retry instanceof Error?1+6:2);assert.equal(data.verifier.verified,false);assert.match(data.text,/La oss se/);assert.match(data.text,/OPPGAVE: 47\+38/);assert.ok(!/private|SJEKK|Kontroller/.test(data.text));
 });
 test('B-1 structured-only response retains valid markers without requiring prose',async()=>{
   const {data,calls}=await worker([markers+' [[SJEKK: 47+38 | 85 | riktig]]']);assert.equal(calls,1);assert.match(data.text,/Svaret stemmer/);assert.match(data.text,/\[\[PRØV:/);assert.match(data.text,/\[\[ORD:/);
@@ -52,6 +53,11 @@ test('B-1 unit injection, mixed malformed markers and arbitrary teaching intents
   const valid=await worker(['[[STEG: {"type":"html","text":"bad-verdict"}]] [[STEG: {"type":"spørsmål","expression":"alert(1)"}]] [[VIS: {"type":"html","html":"bad-visual"}]] [[SJEKK: 2+3 | 5 | riktig]]']);
   assert.ok(!/bad-|alert|STEG|VIS/.test(valid.data.text));
 });
+test('S10 STEG fact equal to checked answer value is not rendered',async()=>{const {data,calls}=await worker(['[[STEG: {"type":"fakta","expression":"80+5","answer":"85"}]] [[STEG: {"type":"fakta","expression":"7+8","answer":"15"}]] [[SJEKK: 47+38 | 76 | feil]]']);assert.equal(calls,1);assert.doesNotMatch(data.text,/80\+5 = 85/);assert.match(data.text,/7\+8 = 15/);});
+test('S10 legacy prose fact revealing checked answer is dropped',async()=>{const {data,calls}=await worker(['Husk at 47+38 er 85. [[SJEKK: 47+38 | 76 | feil]]']);assert.equal(calls,1);assert.doesNotMatch(data.text,/47\+38 = 85/);assert.doesNotMatch(data.text,/85/);});
+test('S10 identical duplicate SJEKK markers collapse without a retry',async()=>{const {data,calls}=await worker(['[[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2 + 3 | 5 | riktig]]']);assert.equal(calls,1);assert.equal(data.verifier.verified,true);assert.equal(data.text.split('[[SJEKK:').length-1,1);});
+test('S10 contradictory duplicate SJEKK markers force reconciliation then neutral fallback',async()=>{const {data,calls}=await worker(['[[OPPGAVE: 2+3]] [[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 6 | feil]]','[[OPPGAVE: 2+3]] [[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 6 | feil]]']);assert.equal(calls,2);assert.equal(data.verifier.verified,false);assert.match(data.text,/La oss se/);assert.doesNotMatch(data.text,/SJEKK/);});
+test('S10 A.inspect dedupes and flags contradictions',async()=>{const r1=A.inspect('[[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 5 | riktig]]');assert.equal(r1.checks.length,1);assert.equal(r1.repair,false);assert.equal(r1.raw,2);const r2=A.inspect('[[SJEKK: 2+3 | 5 | riktig]] [[SJEKK: 2+3 | 6 | feil]]');assert.equal(r2.repair,true);});
 test('B-1 backup provider uses the same bounded teaching protocol',async()=>{
   const {data,calls}=await worker(['[[STEG: {"type":"hint","strategy":"deleOpp"}]] '+markers+' [[SJEKK: 47+38 | 75 | feil]]'],true);
   assert.equal(calls,1);assert.equal(data.provider,'groq');assert.match(data.text,/dele tallene/);assert.match(data.text,/\[\[VIS:/);
@@ -121,10 +127,10 @@ test('I-3 rolling archive/aggregate bounds preserve mastery and sibling and are 
   const k={sessions:Array.from({length:30},(_,i)=>archive(i)),learning:retained()},sibling={sessions:[archive(99)],learning:retained()},before=JSON.stringify(sibling),skill=JSON.stringify(k.learning.skills);
   k.learning.sessions=Array.from({length:1000},(_,i)=>session(i));L.prune(k,base);assert.equal(k.sessions.length,8);assert.equal(k.sessions[0].id,'archive22');assert.equal(k.learning.sessions.length,120);assert.equal(k.learning.sessions[0].id,'session880');assert.equal(JSON.stringify(k.learning.skills),skill);assert.equal(JSON.stringify(sibling),before);assert.equal(L.state(k.learning.skills.add1),'SITTER');const once=JSON.stringify(k);L.prune(k,base);assert.equal(JSON.stringify(k),once);
 });
-test('I-3 load-time bound, migration backup and export/import preserve compact mastery',()=>{
+test('I-3 load-time bound, migration backup and export/import preserve compact history (mastery is revalidated locally)',()=>{
   const learning=retained();learning.sessions=Array.from({length:140},(_,i)=>session(i));const legacy=[{name:'A',age:8,notes:['keep'],sessions:Array.from({length:12},(_,i)=>archive(i)),learning},{name:'B',age:8,sessions:[archive(99)],learning:L.empty()}];
   const f=frontend({storage:{...pairedStorage,spark_kids:legacy}});assert.equal(f.app.state().kids[0].sessions.length,8);assert.equal(f.app.state().kids[1].sessions.length,1);assert.equal(f.app.state().kids[0].learning.sessions.length,120);assert.equal(JSON.parse(JSON.parse(f.w.localStorage.getItem('spark_learning_backup')).kids)[0].sessions.length,12);
-  const exported=f.app.learningExport(),imported=f.app.validateImport(plain(exported));assert.equal(imported[0].sessions.length,8);assert.equal(imported[0].learning.sessions.length,120);assert.equal(L.state(imported[0].learning.skills.add1),'SITTER');assert.equal(imported[1].sessions.length,1);const storage={...f.w.localStorage};f.dom.window.close();const g=frontend({storage});assert.equal(g.app.state().kids[0].sessions.length,8);assert.equal(g.app.state().kids[0].learning.sessions.length,120);g.dom.window.close();
+  const exported=f.app.learningExport(),imported=f.app.validateImport(plain(exported));assert.equal(imported[0].sessions.length,8);assert.equal(imported[0].learning.sessions.length,120);assert.notEqual(L.state(imported[0].learning.skills.add1),'SITTER');assert.equal(imported[0].learning.skills.add1.imported.length,3);assert.equal(imported[1].sessions.length,1);const storage={...f.w.localStorage};f.dom.window.close();const g=frontend({storage});assert.equal(g.app.state().kids[0].sessions.length,8);assert.equal(g.app.state().kids[0].learning.sessions.length,120);g.dom.window.close();
 });
 test('I-3 nested session collections and active events stay bounded while duration accumulates',()=>{
   const s=session(0);s.events=Array.from({length:5000},(_,i)=>({...session(i).events[0]}));s.interactions=Array.from({length:5000},(_,i)=>base+i);L.boundSession(s);assert.equal(s.events.length,120);assert.equal(s.interactions.length,240);

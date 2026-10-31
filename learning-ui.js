@@ -122,8 +122,8 @@ function preparePractice(){
 function startPractice(type){
   const memory=kid().learning ||= L.empty(),now=Date.now();
   let items=type==='review'?L.due(memory,now).map((id,i)=>L.generate(id,Math.floor(now/L.DAY)+i)):
-    type==='words'?memory.items.slice(0,3).map(wordItem):[0,1,2].map(n=>L.generate('times2510',Math.floor(now/1000)+n*11));
-  if(type==='review')items=[...items,...memory.items.filter(i=>i.due<=now).map(wordItem)].slice(0,3);
+    type==='words'?memory.items.slice(0,3).map(wordItem):L.round('times2510',Math.floor(now/1000),3);
+  if(type==='review')items=[...items,...L.dueWords(memory,now).map(wordItem)].slice(0,3);
   items=items.filter(Boolean);if(!items.length){startNotice='Ingen oppgaver å hente fram akkurat nå. Du kan fortsette med leksa.';render();return;}
   if(!preparePractice())return;
   learningSession.queue=items;learningSession.practiceKind=type==='review'?'cold':'task';advancePractice();
@@ -185,7 +185,7 @@ function renderLearningPanel(box){
   if(taskMode==='lesing')renderReading(box);
 }
 function learningStartHTML(){
-  const memory=kid().learning ||= L.empty(),count=L.due(memory,Date.now()).length+memory.items.filter(i=>i.due<=Date.now()).length;
+  const memory=kid().learning ||= L.empty(),count=L.due(memory,Date.now()).length+L.dueWords(memory,Date.now()).length;
   const learned=Object.entries(memory.skills).filter(([,r])=>['SELVSTENDIG','SITTER'].includes(L.state(r)));
   return `<details class="practice"><summary>En liten øverunde${count?' · noe er klart for repetisjon':''}</summary><p class="t2">Inntil tre oppgaver. Du kan hoppe over.</p><button class="btn ghost sm" id="reviewStart">5-minutters oppvarming</button><button class="qb" id="timesStart">Gangetabell</button><button class="qb" id="wordsStart">Ukeord / gloser</button><details><summary>Legg inn ord til øving</summary><label for="wordList">Ett ord | forklaring per linje (maks 20)</label><textarea id="wordList" rows="3" placeholder="house | hus"></textarea><button class="qb" id="saveWords">Lagre ordene</button></details></details>
   ${learned.length?`<details><summary>Ting jeg kan nå</summary>${learned.map(([id,r])=>`<p>${esc(L.CATALOG[id].label)} · ${L.state(r)==='SITTER'?'Sitter':'Klarte med lite eller ingen hjelp'} · ${new Date(r.independentAt).toLocaleDateString('nb-NO')}</p>`).join('')}</details>`:''}`;
@@ -213,14 +213,14 @@ function parentEventLabel(e){
 }
 function parentHTML(){
   const m=kid().learning ||= L.empty(),records=Object.entries(m.skills),sessions=m.sessions.slice().sort((a,b)=>(b.startedAt||0)-(a.startedAt||0));
-  const names=records.map(([id,r])=>{const events=r.ev||[],sessions=new Set(events.filter(e=>e.s>=3||e.e==='begrep').map(e=>e.sid));return `<li>${esc(L.CATALOG[id]?.label||id)}: ${esc({NY:'Ny',ØVER:'Øver på',MED_STØTTE:'Klarer med hint',SELVSTENDIG:'Klarte med lite eller ingen hjelp',SITTER:'Sitter etter utsatte sjekker'}[L.state(r)])}${r.independentAt?' · selvstendig '+new Date(r.independentAt).toLocaleDateString('nb-NO'):''}${r.retainedAt?' · sitter '+new Date(r.retainedAt).toLocaleDateString('nb-NO'):''}${r.due?' · repetisjon '+new Date(r.due).toLocaleDateString('nb-NO'):''}${sessions.size>=2?' · trengte mye støtte i flere økter':''}${r.helped?' · hjalp: '+esc(r.helped):''}</li>`;}).join('');
-  const weeks=[3,2,1,0].map(n=>{const end=Date.now()-n*7*L.DAY,start=end-7*L.DAY;const counts=[0,0,0];for(const s of sessions)for(const e of s.events||[])if(e.t>=start&&e.t<end&&e.ok===true&&e.verified===true&&e.c!=='gjetter')counts[e.s<=1?0:e.s===2?1:2]++;return counts;});
+  const names=records.map(([id,r])=>{const events=r.ev||[],sessions=new Set(events.filter(e=>e.s>=3||e.e==='begrep').map(e=>e.sid));return `<li>${esc(L.CATALOG[id]?.label||id)}: ${esc({NY:'Ny',ØVER:'Øver på',MED_STØTTE:'Klarer med hint',SELVSTENDIG:'Klarte med lite eller ingen hjelp',SITTER:'Sitter etter utsatte sjekker'}[L.state(r)])}${r.independentAt?' · selvstendig '+new Date(r.independentAt).toLocaleDateString('nb-NO'):''}${r.retainedAt?' · sitter '+new Date(r.retainedAt).toLocaleDateString('nb-NO'):''}${r.due?' · repetisjon '+new Date(r.due).toLocaleDateString('nb-NO'):''}${sessions.size>=2?' · trengte mye støtte i flere økter':''}${r.helped?' · hjalp: '+esc(r.helped):''}${r.imported?.length?' · tidligere historikk fra kopi, bekreftes på nytt her':''}</li>`;}).join('');
+  const weeks=[3,2,1,0].map(n=>{const end=Date.now()-n*7*L.DAY,start=end-7*L.DAY;const counts=[0,0,0];for(const s of sessions)if(!s.imported)for(const e of s.events||[])if(e.t>=start&&e.t<end&&e.ok===true&&e.verified===true&&e.c!=='gjetter')counts[e.s<=1?0:e.s===2?1:2]++;return counts;});
   const max=Math.max(1,...weeks.map(a=>a.reduce((x,y)=>x+y,0)));
   const bars=weeks.map((counts,i)=>{let y=100;return counts.map((n,j)=>{const h=n/max*85;y-=h;return `<rect x="${20+i*65}" y="${y}" width="38" height="${h}" fill="${['#2a7558','#b78a26','#7851a9'][j]}"/>`;}).join('');}).join('');
   return `<section class="prof"><h2>Læring over tid</h2><p>Observasjoner av oppgaver, ikke en vurdering av barnet. Samtaler vises bare i «Tidligere økter».</p><ul>${names||'<li>Ingen læringshendelser ennå.</li>'}</ul>
     <svg viewBox="0 0 290 125" role="img" aria-label="Bekreftede riktige svar de siste fire ukene. ${weeks.map((a,i)=>'Uke '+(i+1)+': S0–S1 '+a[0]+', S2 '+a[1]+', S3–S4 '+a[2]).join('. ')}">${bars}<text x="10" y="120" font-size="11">Fire uker siden → nå · S0–S1 / S2 / S3–S4</text></svg><p>Kun bekreftede riktige svar: grønn med lite/ingen støtte (S0–S1), gul med hint (S2), lilla med mye støtte (S3–S4). Forsøk uten bekreftet riktig svar og gjetting er ikke med. Høyeste støtte per oppgave, ikke poeng.</p>
     <p>Utsatte sjekker: ${m.totals.independentCold} med lite/ingen støtte av ${m.totals.cold} observerte. Dette er et læringssignal, ikke en karakter.</p>
-    ${sessions.slice(0,30).map(s=>`<p>${s.startedAt?new Date(s.startedAt).toLocaleString('nb-NO'):'Eldre økt – tidspunkt ukjent'} · ${esc(MODE_NAME[s.mode]||s.mode)} · ${Math.round(s.activeMs/60000)} aktive minutter<br>${(s.events||[]).map(e=>esc(L.CATALOG[e.skill]?.label||e.skill)+' — '+parentEventLabel(e)).join('<br>')}${s.reflection?'<br>Hva hjalp: '+esc(s.reflection):''}</p>`).join('')}
+    ${sessions.slice(0,30).map(s=>`<p>${s.startedAt?new Date(s.startedAt).toLocaleString('nb-NO'):'Eldre økt – tidspunkt ukjent'} · ${esc(MODE_NAME[s.mode]||s.mode)} · ${Math.round(s.activeMs/60000)} aktive minutter${s.imported?' · fra kopi, ikke bekreftet på denne enheten':''}<br>${(s.events||[]).map(e=>esc(L.CATALOG[e.skill]?.label||e.skill)+' — '+parentEventLabel(e)).join('<br>')}${s.reflection?'<br>Hva hjalp: '+esc(s.reflection):''}</p>`).join('')}
     <p>Samtaleforslag: Be barnet vise én ting det fant ut selv. La barnet være læreren.</p><p>Les høyt sammen med en voksen. Spark vurderer ikke uttale eller leseflyt.</p>
     <label><input type="checkbox" id="readAloudAllowed" ${kid().readAloud?'checked':''}> Tillat «Les for meg» ved tekstforståelse</label>
     <p>Mikrofon er valgfri. Nettleseren kan sende tale til sin skytjeneste. Spark lagrer ikke lyd. Gjenkjent tekst må sjekkes før sending. Inntil 8 samtaler beholdes i maksimalt 30 dager. Inntil 120 lette øktoppsummeringer og kompakt ferdighetsevidens beholdes lokalt.</p>
@@ -235,11 +235,11 @@ function bindParent(){
   $('recoverLearning').onclick=()=>{
     const raw=store.getItem('spark_learning_backup');if(!raw){alert('Ingen migreringskopi finnes.');return;}
     if(!confirm('Gjenopprette tidligere data som nye profiler? Nåværende barn beholdes.'))return;
-    try{const backup=JSON.parse(raw),old=JSON.parse(backup.kids||'[]');if(!Array.isArray(old))throw Error('Ugyldig eldre data');const imported=old.map(k=>({...blankKid(''),name:typeof k?.name==='string'?k.name:'Gjenopprettet',age:Number.isInteger(k?.age)?k.age:8,notes:Array.isArray(k?.notes)?k.notes.filter(n=>typeof n==='string'):[],log:Array.isArray(k?.log)?k.log:[],sessions:Array.isArray(k?.sessions)?k.sessions.filter(s=>validChat(s?.msgs)):[],learning:L.empty()}));const offset=kids.length;kids.push(...imported);if(!saveKids()){kids.length=offset;return;}for(const [i,session] of backup.sessions||[]){if(i>=imported.length)continue;try{const s=JSON.parse(session);s.kid=offset+i;store.setItem(sessionKey(offset+i),JSON.stringify(s));}catch{}}render();}catch{alert('Kopien kunne ikke gjenopprettes automatisk. Den er bevart lokalt.');}
+    try{const backup=JSON.parse(raw),old=JSON.parse(backup.kids||'[]');if(!Array.isArray(old))throw Error('Ugyldig eldre data');const imported=old.map(k=>({...blankKid(''),name:typeof k?.name==='string'?k.name:'Gjenopprettet',age:Number.isInteger(k?.age)?k.age:8,notes:Array.isArray(k?.notes)?k.notes.filter(n=>typeof n==='string'):[],log:Array.isArray(k?.log)?k.log.filter(e=>e&&['d','m','t'].every(x=>typeof e[x]==='string')).slice(-20):[],sessions:Array.isArray(k?.sessions)?k.sessions.filter(s=>validChat(s?.msgs)).map(s=>({...s,migratedAt:Number.isSafeInteger(s.migratedAt)?s.migratedAt:Date.now()})):[],learning:L.empty()}));imported.forEach(k=>L.prune(k,Date.now()));const offset=kids.length;kids.push(...imported);if(!saveKids()){kids.length=offset;return;}for(const [i,session] of backup.sessions||[]){if(i>=imported.length)continue;try{const s=JSON.parse(session);s.kid=offset+i;if(!Number.isSafeInteger(s.migratedAt)&&!Number.isSafeInteger(s.ts))s.migratedAt=Date.now();store.setItem(sessionKey(offset+i),JSON.stringify(s));}catch{}}render();}catch{alert('Kopien kunne ikke gjenopprettes automatisk. Den er bevart lokalt.');}
   };
   $('deleteLearning').onclick=()=>{if(!confirm('Slette økter, notater, ord og læringshistorikk for dette barnet?'))return;const k=kid();k.notes=[];k.log=[];k.sessions=[];k.learning=L.empty();store.removeItem(sessionKey());const raw=store.getItem('spark_learning_backup');if(raw){try{const b=JSON.parse(raw),old=JSON.parse(b.kids||'[]');if(Array.isArray(old)){old[active]=null;b.kids=JSON.stringify(old);}b.sessions=(b.sessions||[]).filter(([i])=>i!==active);b.legacy=null;store.setItem('spark_learning_backup',JSON.stringify(b));}catch{store.removeItem('spark_learning_backup');}}resetLearning();chatMsgs=[];history=[];transcript='';saveKids();render();};
 }
-function validateImport(data){
+function validateImport(data,now=Date.now()){
   if(data?.schema!=='spark-learning-export-v3'||!Array.isArray(data.kids)||!data.kids.length||data.kids.length>20)throw Error('Ukjent format.');
   return data.kids.map(k=>{
     if(!k||typeof k.name!=='string'||!Number.isInteger(k.age)||k.age<4||k.age>16||k.learning?.version!==3||!Array.isArray(k.learning.items)||!Array.isArray(k.learning.sessions)||!k.learning.skills)throw Error('Ugyldig profil.');
@@ -248,8 +248,8 @@ function validateImport(data){
       if(!Object.hasOwn(L.CATALOG,id)||!Array.isArray(r.ev))throw Error('Ukjent ferdighet.');
       for(const e of r.ev)if(!L.event(clean.learning,id,e))throw Error('Ugyldig læringshendelse.');
     }
-    // Preserve validated checkpoints, schedules and word evidence across export/import.
-    const memory=L.normalizeMemory(k.learning);
+    // Imported history is kept for display but carries no verification authority until revalidated here.
+    const memory=L.quarantine(L.normalizeMemory(k.learning),now);
     clean.learning=memory;
     clean.log=Array.isArray(k.log)?k.log.filter(e=>e&&['d','m','t'].every(key=>typeof e[key]==='string')).map(e=>({d:e.d,m:e.m,t:e.t.slice(0,240),...(Number.isSafeInteger(e.ts)?{ts:e.ts}:{})})):[];
     clean.sessions=(k.sessions||[]).filter(s=>typeof s?.d==='string'&&typeof s.m==='string'&&typeof s.t==='string'&&Array.isArray(s.msgs)).map(s=>({id:String(s.id||newSessionId()),d:s.d,m:s.m,t:s.t.slice(0,60),summary:String(s.summary||'').slice(0,260),startedAt:s.startedAt,endedAt:s.endedAt,migratedAt:Date.now(),msgs:s.msgs.filter(m=>['assistant','user'].includes(m?.role)&&typeof m.text==='string').map(m=>({role:m.role,text:m.text,ts:m.ts}))}));
