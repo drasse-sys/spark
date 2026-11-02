@@ -484,7 +484,7 @@ function isMinuteQuota(err){
 }
 async function fetchServer(path, options){
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),path==='/pair'?20000:150000);
+  const timer=setTimeout(()=>controller.abort(),path==='/pair'||path.startsWith('/backup/')?20000:150000);
   try{return await fetch(endpoint(path),{...options,signal:controller.signal});}
   catch(err){
     if(controller.signal.aborted) throw new Error('Spark-serveren brukte for lang tid. Vent litt og prøv igjen.');

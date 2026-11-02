@@ -148,15 +148,34 @@
   }
   // An imported copy is history, not verification authority: no file can prove it was checked by this device's checker.
   // Evidence moves to `imported` (shown, never counted); checkpoints, credit totals and anchors restart; practised skills and words are due for local revalidation.
+  function quarantineSkill(r,now){
+    r.imported=[...(r.imported||[]),...r.ev,...r.observations].slice(-LIMITS.imported);
+    r.ev=[];r.observations=[];r.box=r.box?1:0;r.due=r.box?now:null;
+    r.lastAt=null;r.lastSession=null;r.independentAt=null;r.firstColdAt=null;r.retainedAt=null;r.helped='';delete r.seenObs;
+  }
+  function quarantineWord(w,now){w.box=1;w.due=now;w.lastAt=null;}
   function quarantine(memory,now){
-    for(const r of Object.values(memory.skills)){
-      r.imported=[...(r.imported||[]),...r.ev,...r.observations].slice(-LIMITS.imported);
-      r.ev=[];r.observations=[];r.box=r.box?1:0;r.due=r.box?now:null;
-      r.lastAt=null;r.lastSession=null;r.independentAt=null;r.firstColdAt=null;r.retainedAt=null;r.helped='';delete r.seenObs;
-    }
-    for(const w of memory.items){w.box=1;w.due=now;w.lastAt=null;}
+    for(const r of Object.values(memory.skills))quarantineSkill(r,now);
+    for(const w of memory.items)quarantineWord(w,now);
     for(const s of memory.sessions)s.imported=true;
     memory.totals={cold:0,independentCold:0};
+    return memory;
+  }
+  // TR1: a copy the family's Worker signed keeps the authority native local state can hold, never more.
+  // Input must already be `normalizeMemory` output (bounds, enums, limits). `signedAt` is the Worker's clock, the only
+  // trusted time in the file: authority claimed after it (+CLOCK_SKEW), or authority without the verified evidence that
+  // `event` always leaves behind, cannot be the signed device's own state, so that skill, word or session alone is quarantined.
+  function trust(memory,signedAt,now){
+    if(!Number.isSafeInteger(signedAt)||signedAt<=0)return quarantine(memory,now);
+    const limit=signedAt+CLOCK_SKEW,ok=t=>t===null||t<=limit,dueOk=t=>t===null||t<=limit+SPACING.at(-1)*DAY;
+    for(const r of Object.values(memory.skills)){
+      const times=[...r.ev,...r.observations].map(e=>e.t).concat([r.independentAt,r.firstColdAt,r.retainedAt,r.lastAt]);
+      // Without verified evidence, only box 1 (the residue of an earlier quarantine) and no checkpoints are possible.
+      const consistent=(r.ev.length>0||r.box<=1&&!r.independentAt&&!r.firstColdAt&&!r.retainedAt)&&(!r.retainedAt&&!r.firstColdAt||!!r.independentAt);
+      if(!times.every(ok)||!dueOk(r.due)||!consistent)quarantineSkill(r,now);
+    }
+    for(const w of memory.items)if(!ok(w.lastAt)||!dueOk(w.due)||!w.ev.every(e=>ok(e.t)))quarantineWord(w,now);
+    for(const s of memory.sessions)if(![s.startedAt,s.endedAt,...s.interactions,...s.events.map(e=>e.t)].every(ok))s.imported=true;
     return memory;
   }
   function prune(k,now){
@@ -193,5 +212,5 @@
     const r=memory.skills[t.skill];
     return JSON.stringify({task:t.id,skill:t.skill,s:t.s,state:state(r),kind:session.check?.kind||'task',helped:r?.helped||'',reading:session.readingGoal||''}).slice(0,300);
   }
-  root.SparkLearning={DAY,CLOCK_SKEW,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,round,checkItem,activity,boundSession,aggregate,normalizeMemory,quarantine,prune,migrate,context};
+  root.SparkLearning={DAY,CLOCK_SKEW,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,round,checkItem,activity,boundSession,aggregate,normalizeMemory,quarantine,trust,prune,migrate,context};
 })(globalThis);

@@ -23,6 +23,9 @@ enabled = false
 
 [secrets]
 required = [ "GEMINI_API_KEY", "FAMILY_CODE", "DEVICE_SIGNING_SECRET" ]
+# Optional, deliberately not required: EXPORT_SIGNING_SECRET (>= 32 chars, never reused) enables trusted
+# backups (TR1). Without it, /backup/sign and /backup/verify answer 503 and the phone offers a history-only copy.
+# Rotation: EXPORT_SIGNING_KID (default "k1"), EXPORT_PREVIOUS_KID + EXPORT_PREVIOUS_SECRET. See docs/2026-11-02-SPARK-TR1-Trusted-Backup-Restore.md.
 
 [[ratelimits]]
 name = "CHAT_LIMITER"

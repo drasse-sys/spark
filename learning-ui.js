@@ -230,8 +230,17 @@ function learningExport(){kids.forEach(k=>L.prune(k,Date.now()));return {schema:
 function bindParent(){
   $('readAloudAllowed').onchange=e=>{kid().readAloud=e.target.checked;saveKids();};
   $('clearWords').onclick=()=>{if(confirm('Tømme ordlisten for dette barnet?')){kid().learning.items=[];saveKids();render();}};
-  $('exportLearning').onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(learningExport())],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='spark-laeringskopi.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
-  $('importLearning').onchange=async e=>{try{const file=e.target.files[0];if(!file||file.size>4000000)throw Error('For stor fil.');const data=JSON.parse(await file.text());const imported=validateImport(data);if(!confirm('Legge til '+imported.length+' profiler fra kopien? Eksisterende barn beholdes.'))return;const oldLength=kids.length;kids.push(...imported);if(!saveKids()){kids.length=oldLength;throw Error('Lagringen er full. Kopien er ikke importert.');}render();}catch(err){alert('Kunne ikke lese læringskopien: '+err.message);}};
+  $('exportLearning').onclick=async e=>{
+    const button=e.currentTarget;button.disabled=true;
+    try{
+      let text='';try{text=await signedLearningExport();}catch{}
+      // Signing is never required for a backup: an unconfirmed copy restores as history only.
+      if(!text&&!confirm('Spark kunne ikke bekrefte kopien nå. Laste ned en ubekreftet kopi? Den kan gjenopprettes som historikk, men ferdighetene må da bekreftes på nytt.'))return;
+      downloadText(text||JSON.stringify(learningExport()),text?'spark-laeringskopi-bekreftet.json':'spark-laeringskopi.json');
+    }finally{button.disabled=false;}
+  };
+  // Nothing is committed before the trust decision, the validation and the parent's choice; a failed save rolls back.
+  $('importLearning').onchange=async e=>{try{const file=e.target.files[0];if(!file||file.size>4000000)throw Error('For stor fil.');const {status,kids:imported}=await readLearningCopy(await file.text());if(!confirm(RESTORE_TEXT[status](imported.length)))return;const oldLength=kids.length;kids.push(...imported);if(!saveKids()){kids.length=oldLength;throw Error('Lagringen er full. Kopien er ikke importert.');}render();}catch(err){alert('Kunne ikke lese læringskopien: '+err.message);}};
   $('recoverLearning').onclick=()=>{
     const raw=store.getItem('spark_learning_backup');if(!raw){alert('Ingen migreringskopi finnes.');return;}
     if(!confirm('Gjenopprette tidligere data som nye profiler? Nåværende barn beholdes.'))return;
@@ -239,7 +248,67 @@ function bindParent(){
   };
   $('deleteLearning').onclick=()=>{if(!confirm('Slette økter, notater, ord og læringshistorikk for dette barnet?'))return;const k=kid();k.notes=[];k.log=[];k.sessions=[];k.learning=L.empty();store.removeItem(sessionKey());const raw=store.getItem('spark_learning_backup');if(raw){try{const b=JSON.parse(raw),old=JSON.parse(b.kids||'[]');if(Array.isArray(old)){old[active]=null;b.kids=JSON.stringify(old);}b.sessions=(b.sessions||[]).filter(([i])=>i!==active);b.legacy=null;store.setItem('spark_learning_backup',JSON.stringify(b));}catch{store.removeItem('spark_learning_backup');}}resetLearning();chatMsgs=[];history=[];transcript='';saveKids();render();};
 }
-function validateImport(data,now=Date.now()){
+/* ---- TR1 trusted backup ----
+   The Worker signs only a SHA-256 digest of the exact export bytes; the backup itself never leaves the phone.
+   The file stores those bytes as a JSON string, so no canonical re-serialization is needed: restore hashes the same string. */
+const SIGNED_BACKUP='spark-signed-backup-v1',BACKUP_B64_32=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/;
+const BACKUP_SIG={protocol:'SPARK-EXPORT-V1',digestAlg:'SHA-256',sigAlg:'HMAC-SHA-256'};
+const exactKeys=(o,keys)=>!!o&&typeof o==='object'&&!Array.isArray(o)&&Object.keys(o).sort().join()===keys.slice().sort().join();
+function validSignature(s){
+  return exactKeys(s,['protocol','digestAlg','sigAlg','kid','signedAt','digest','mac'])&&Object.entries(BACKUP_SIG).every(([k,v])=>s[k]===v)&&
+    typeof s.kid==='string'&&/^k[1-9][0-9]{0,2}$/.test(s.kid)&&Number.isSafeInteger(s.signedAt)&&s.signedAt>0&&
+    typeof s.digest==='string'&&BACKUP_B64_32.test(s.digest)&&typeof s.mac==='string'&&BACKUP_B64_32.test(s.mac);
+}
+// UTF-8 encoding replaces a lone surrogate, so two different strings could share a digest. Such a payload is never trusted.
+async function exportDigest(payload){
+  if(typeof payload!=='string'||/\p{Surrogate}/u.test(payload))return '';
+  const bytes=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(payload)));
+  let s='';for(const b of bytes)s+=String.fromCharCode(b);
+  return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+}
+async function backupRequest(path,body,auth){
+  const r=await fetchServer(path,{method:'POST',headers:{'content-type':'application/json',...(auth?{authorization:'Bearer '+deviceToken}:{})},body:JSON.stringify(body)});
+  return {r,d:await r.json().catch(()=>null)};
+}
+// Signed container text, or an Error when signing is unavailable (not paired, offline, secret missing, bad reply).
+async function signedLearningExport(){
+  if(!paired())throw Error('Denne enheten er ikke koblet til Spark-serveren.');
+  const payload=JSON.stringify(learningExport()),digest=await exportDigest(payload);
+  const {r,d}=await backupRequest('/backup/sign',{v:1,digest},true);
+  if(!r.ok||!validSignature(d)||d.digest!==digest)throw Error(d?.error||'Spark kunne ikke bekrefte kopien.');
+  return JSON.stringify({schema:SIGNED_BACKUP,payload,signature:d});
+}
+// 'trusted' only on an explicit {valid:true}. Any other reply, network failure or timeout is not a confirmation.
+async function verifyBackup(signature,digest){
+  try{
+    if(!validServer(serverUrl))return 'unavailable';
+    const {r,d}=await backupRequest('/backup/verify',{v:1,...signature,digest},false);
+    if(r.status===200&&exactKeys(d,['valid'])&&d.valid===true)return 'trusted';
+    if(r.status===200&&exactKeys(d,['valid','reason'])&&d.valid===false&&d.reason==='signature')return 'invalid';
+    return 'unavailable';
+  }catch{return 'unavailable';}
+}
+// Decides trust and builds new profiles without touching current ones. Returns {status,kids}.
+async function readLearningCopy(text,now=Date.now()){
+  let data;try{data=JSON.parse(text);}catch{throw Error('Ukjent format.');}
+  if(data?.schema!==SIGNED_BACKUP)return {status:'unsigned',kids:validateImport(data,now)};
+  if(typeof data.payload!=='string')throw Error('Ukjent format.');
+  let inner;try{inner=JSON.parse(data.payload);}catch{throw Error('Ukjent format.');}
+  let status='invalid';
+  if(exactKeys(data,['schema','payload','signature'])&&validSignature(data.signature)){
+    const digest=await exportDigest(data.payload);
+    if(digest&&digest===data.signature.digest)status=await verifyBackup(data.signature,digest);
+  }
+  return {status,kids:validateImport(inner,now,status==='trusted'?{signedAt:data.signature.signedAt}:null)};
+}
+const RESTORE_TEXT={
+  trusted:n=>'Denne sikkerhetskopien er bekreftet av Spark.\nLegge til '+n+' profiler? Ferdighetene beholdes. Eksisterende barn beholdes.',
+  unsigned:n=>'Denne kopien er ikke bekreftet av Spark.\nLegge til '+n+' profiler som historikk? Ferdighetene bekreftes på nytt på denne enheten. Eksisterende barn beholdes.',
+  invalid:n=>'Advarsel: Kopien er endret etter at den ble laget, eller bekreftelsen er ugyldig.\nDen kan bare legges til som historikk, og ferdighetene må bekreftes på nytt. Legge til '+n+' profiler som historikk?',
+  unavailable:n=>'Spark kunne ikke bekrefte kopien nå (ingen kontakt med Spark-serveren).\nAvbryt for å prøve igjen senere, eller legg til '+n+' profiler som historikk nå. Ferdighetene må da bekreftes på nytt. Legge til som historikk nå?'
+};
+function downloadText(text,name){const url=URL.createObjectURL(new Blob([text],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+function validateImport(data,now=Date.now(),trusted=null){
   if(data?.schema!=='spark-learning-export-v3'||!Array.isArray(data.kids)||!data.kids.length||data.kids.length>20)throw Error('Ukjent format.');
   return data.kids.map(k=>{
     if(!k||typeof k.name!=='string'||!Number.isInteger(k.age)||k.age<4||k.age>16||k.learning?.version!==3||!Array.isArray(k.learning.items)||!Array.isArray(k.learning.sessions)||!k.learning.skills)throw Error('Ugyldig profil.');
@@ -249,7 +318,8 @@ function validateImport(data,now=Date.now()){
       for(const e of r.ev)if(!L.event(clean.learning,id,e))throw Error('Ugyldig læringshendelse.');
     }
     // Imported history is kept for display but carries no verification authority until revalidated here.
-    const memory=L.quarantine(L.normalizeMemory(k.learning),now);
+    // Only a copy whose signature the Worker confirmed keeps authority, after the same validation and normalization.
+    const memory=trusted?L.trust(L.normalizeMemory(k.learning),trusted.signedAt,now):L.quarantine(L.normalizeMemory(k.learning),now);
     clean.learning=memory;
     clean.log=Array.isArray(k.log)?k.log.filter(e=>e&&['d','m','t'].every(key=>typeof e[key]==='string')).map(e=>({d:e.d,m:e.m,t:e.t.slice(0,240),...(Number.isSafeInteger(e.ts)?{ts:e.ts}:{})})):[];
     clean.sessions=(k.sessions||[]).filter(s=>typeof s?.d==='string'&&typeof s.m==='string'&&typeof s.t==='string'&&Array.isArray(s.msgs)).map(s=>({id:String(s.id||newSessionId()),d:s.d,m:s.m,t:s.t.slice(0,60),summary:String(s.summary||'').slice(0,260),startedAt:s.startedAt,endedAt:s.endedAt,migratedAt:Date.now(),msgs:s.msgs.filter(m=>['assistant','user'].includes(m?.role)&&typeof m.text==='string').map(m=>({role:m.role,text:m.text,ts:m.ts}))}));
