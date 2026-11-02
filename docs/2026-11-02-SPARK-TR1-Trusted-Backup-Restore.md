@@ -13,12 +13,20 @@ TR1 lets a copy keep its authority on restore when the family's Worker signed it
 
 This gives trusted transport and restore integrity across devices under Spark's existing client trust model. The browser client stays inside the trusted application boundary.
 
-**Trust root.** The restoring phone accepts a confirmation **only from the Worker it is paired with** (`paired()`, i.e. the server address equals the server that issued its device token). A phone that was never paired, or whose ⚙️ server address was changed away from its pairing server, sends no verify request and restores history only. Otherwise anyone who could change the unprotected server-address setting could point it at a server that answers `{valid:true}` (found in the TR1 review, now fixed and covered by a test and a negative control). Remaining consequence: someone who can open ⚙️ **and** pair the phone with a Worker they control (their own deployment and family code) can make that phone accept their own signatures. That is equivalent to controlling the client.
+**Trust root: the Worker the app build ships with** (`DEFAULT_SERVER_URL` in `spark.html`). Signing and verification requests go only to that origin, with `redirect:'error'`. Verification ignores the ⚙️ server address and ignores which server the phone is paired with. Signing happens only when the phone is paired with that same origin; otherwise export offers the unconfirmed copy.
+
+Why not "the server in settings" or "the paired server": both are unprotected settings. `pairDevice` accepts any server that returns a `{token}`, so anyone with UI access could pair the phone with a two-endpoint fake server that answers `{valid:true}` and confirm a hand-written file. Both reviews found this: the first for the ⚙️ address, the second for the paired-server variant of the first repair. It is now closed by pinning, and covered by a test, a negative control and the Chromium check.
+
+Consequences:
+- Changing the trust root means changing the app code, which is the client trust boundary (out of scope).
+- A family that hosts its own build sets its own Worker in `DEFAULT_SERVER_URL`, as the setup already expects.
+- Development servers entered under "Avansert" produce history-only copies.
+- A new phone can restore a trusted copy **before pairing**.
 
 **It does not prove:**
 - that the child's answers originally happened, or that the local checker produced the evidence. The server never sees learning events.
 - anything about a client that was modified before it asked for a signature. **A device-token holder can get a signature for any digest**, including one for a hand-written file, and anyone who knows the family code can become such a holder by pairing a desktop browser. This is a real extension of what a token holder can do: before TR1, crafted mastery stayed inside the browser storage it was written to. With TR1 it becomes a portable file that restores as trusted on any phone paired with that Worker, through the normal UI, and it stays valid after `REVOKE_BEFORE`. Only rotating the export key invalidates it. The family code is therefore also the gate for creating trusted backups.
-- What TR1 does stop: files from outside the family, edited files, and files signed by other Spark deployments (each family runs its own Worker and key, and the phone asks only its own paired Worker).
+- What TR1 does stop: files from outside the family, edited files, and files signed by other Spark deployments (each family runs its own Worker and key, and the phone asks only the Worker its app build ships with).
 
 **It does not protect against:**
 - a malicious user changing a compromised client before it requests a signature;
@@ -55,7 +63,7 @@ Both endpoints are CORS-restricted like `/chat` and `/pair`, use Spark-owned err
 
 | | `POST /backup/sign` | `POST /backup/verify` |
 |---|---|---|
-| Auth | Device token (`Authorization: Bearer`), same check as `/chat` (signature, expiry, `REVOKE_BEFORE`) → 401 | None on the server: it reveals one bit (plus whether a kid exists) and no key material. The **client** only asks its paired Worker (§2), so in practice restore needs pairing first |
+| Auth | Device token (`Authorization: Bearer`), same check as `/chat` (signature, expiry, `REVOKE_BEFORE`) → 401 | None: it reveals one bit (plus whether a kid exists) and no key material, so a new phone can restore before pairing. The **client** only ever asks the build's Worker (§2) |
 | Rate limit | `CHAT_LIMITER`, key `backup-sign:<deviceId>` (own counter) | `PAIR_GLOBAL_LIMITER` key `backup-verify`, `PAIR_LIMITER` key `backup-verify:<ip>` (own counters, so pairing keeps its budget) |
 | Body | exactly `{v:1, digest}`; ≤ 512 bytes (streamed byte count) | exactly `{v:1, protocol, digestAlg, sigAlg, kid, signedAt, digest, mac}`; ≤ 1024 bytes |
 | Extra keys | 400, so child data cannot be sent | 400 |
@@ -90,7 +98,6 @@ The client (`readLearningCopy`) builds the new profiles and decides trust **befo
 | **Unsigned / legacy** (`spark-learning-export-v3`) | "Denne kopien er ikke bekreftet av Spark. … som historikk? Ferdighetene bekreftes på nytt …" | CF1 quarantine, byte-for-byte the CF1 result (test 12 compares with the released function) |
 | **Invalid / tampered** (payload edited, digest/MAC/kid/time changed, malformed envelope, extra container keys, lone surrogate, Worker `reason:'signature'`) | "Advarsel: Kopien er endret … kan bare legges til som historikk … som historikk?" (the parent must choose) | CF1 quarantine only if the parent accepts; otherwise nothing changes |
 | **Verification unavailable** (offline, timeout, any non-200, malformed reply, `{valid:"true"}`, extra fields, Worker 503) | "Spark kunne ikke bekrefte kopien nå … Avbryt for å prøve igjen senere, eller legg til … som historikk nå" | Fail closed: CF1 quarantine if accepted; cancel leaves storage untouched |
-| **Phone not paired** (never paired, or ⚙️ address differs from the pairing server) | "Kopien kan bare bekreftes når denne telefonen er koblet til familiens Spark-server. Avbryt, koble telefonen i ⚙️ og gjenopprett på nytt …" | No request sent; CF1 quarantine if accepted |
 | **Key retired** (Worker `reason:'key'`) | "Spark-serveren kan ikke lenger bekrefte denne kopien (signeringsnøkkelen er byttet ut)…" | CF1 quarantine if accepted |
 
 Only an exact `200 {"valid":true}` counts as trusted. Nothing fails open.
@@ -114,15 +121,15 @@ These are **necessary, not sufficient** conditions. Native `ev` is truncated to 
 The export allowlist is unchanged: `name, age, interests, notes, log, sessions, learning, readAloud`. The envelope adds only the seven signature fields. Tests 17 and the browser check confirm that neither the signed file nor the fallback file contains the device token or any part of it, the `spark_device_*` / `spark_server_url` keys, `Bearer`, the server URL, `EXPORT_SIGNING_SECRET`, `DEVICE_SIGNING_SECRET`, `FAMILY_CODE`, or provider keys.
 
 ## 9. Evidence
-- `tests/tr1-trusted-backup.test.mjs` has 28 tests. They cover the 18 required cases, fail-closed secret handling, rotation (including same-kid rotation and the no-fallback-to-previous rule), the paired-Worker trust root, UX messages, and 8 **negative controls**. Each control removes or loosens exactly one trust check in the evaluated source: the Worker MAC compare, domain separation, device auth, the client's local digest compare, the strict reply check, the paired-Worker binding, use of the verification result, and normalization/invariants. It then shows that the attack the matching test blocks succeeds. A missing patch target fails the control, so a refactor cannot make it pass vacuously.
-- `tests/browser-trusted-restore-check.mjs` (real Chromium, real page Web Crypto; `/backup/*` answered by the real Worker code in-process with a fixture secret) covers: signed export, digest parity between browser and Node, no secrets in the file, a digest-only sign request, signed restore on a second paired phone keeping `SITTER`, a never-paired phone sending no request and restoring history only, a verify request with no credentials and no child data, a tampered payload caught locally without a request, a re-digested forgery refused by the Worker, a legacy unsigned file quarantined, verify offline (cancel leaves storage untouched, accept gives history only), and the export fallback when signing is unavailable. It runs in CI as its own step.
+- `tests/tr1-trusted-backup.test.mjs` has 28 tests. They cover the 18 required cases, fail-closed secret handling, rotation (including same-kid rotation and the no-fallback-to-previous rule), the pinned trust root (never-paired phone, phone paired with a yes-server, other Worker key), UX messages, and 8 **negative controls**. Each control removes or loosens exactly one trust check in the evaluated source: the Worker MAC compare, domain separation, device auth, the client's local digest compare, the strict reply check, the pinned verifier origin, use of the verification result, and normalization/invariants. It then shows that the attack the matching test blocks succeeds. A missing patch target fails the control, so a refactor cannot make it pass vacuously.
+- `tests/browser-trusted-restore-check.mjs` (real Chromium, real page Web Crypto; `/backup/*` answered by the real Worker code in-process with a fixture secret) covers: signed export, digest parity between browser and Node, no secrets in the file, a digest-only sign request, signed restore on a second paired phone keeping `SITTER`, a never-paired phone restoring trusted without credentials, a phone paired with a server that answers `{valid:true}` (forgery still refused; that server is never asked), a verify request with no credentials and no child data, a tampered payload caught locally without a request, a re-digested forgery refused by the Worker, a legacy unsigned file quarantined, verify offline (cancel leaves storage untouched, accept gives history only), and the export fallback when signing is unavailable. It runs in CI as its own step.
 - The service-worker cache generation is now `spark-learning-20261102-tr1`.
 
 ## 10. Manual deploy steps (not run)
 1. Generate a secret locally: `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
 2. From `backend/`: `npx wrangler secret put EXPORT_SIGNING_SECRET` (it must differ from every other Spark secret and be at least 32 characters).
 3. `npx wrangler deploy` from the merged branch.
-4. Smoke test: export from a paired phone gives `spark-laeringskopi-bekreftet.json`. Pair a second phone first, then restore the file on it. It shows "Denne sikkerhetskopien er bekreftet av Spark." and keeps the skill states. Editing one character in the file gives the "Advarsel" prompt.
+4. Smoke test: export from a paired phone gives `spark-laeringskopi-bekreftet.json`. Restoring it on a second phone (paired or not) shows "Denne sikkerhetskopien er bekreftet av Spark." and keeps the skill states. Editing one character in the file gives the "Advarsel" prompt.
 
 The package is safe before step 2: signing and verification answer 503, export offers the history-only copy, and restore uses CF1 quarantine.
 
@@ -130,3 +137,16 @@ The package is safe before step 2: signing and verification answer 503, export o
 - **drasse-sys/spark#3 (RH1)** touches `.github/workflows/ci.yml` (pins actions), `backend/src/index.js` (`GENERATION` constant, `/health`), `tests/worker.test.mjs`, `tests/live-check.mjs`, and `docs/RELEASE-CHECKLIST.md`. TR1 edits other regions of `index.js` and adds a CI step at the end of the file. Expect a clean or trivial merge. If RH1 lands first, its release convention asks for a `GENERATION` bump for a Worker-deploying release, which TR1 is.
 - **drasse-sys/spark#4 (UX1)** touches `learning-ui.js` (other functions), `spark.html` (other lines), `sw.js` (the `CACHE` line, which **conflicts**), and `ci.yml` (adds a step at the same place, which **conflicts**). Resolution: keep both CI steps, and choose one new cache generation newer than both (for example `spark-learning-<date>-tr1ux1`).
 - Merge order: either order works. The second PR to merge needs a trivial conflict resolution in `sw.js` and `ci.yml`, then a full CI rerun.
+
+## 12. Review history
+1. **Fresh segregated review of `b7a4060`.**
+   - **Medium:** the ⚙️ server address was the trust root, so any server answering `{valid:true}` could confirm a forged file.
+   - **Low:** rotation edge cases. `L.trust` let some impossible states through.
+   - **Wording:** the claim over-stated what a token holder can and cannot do.
+   - **Tests:** one negative control was circular, and one test title did not match what it checked.
+   - Repaired in `c8ee52d`. That repair bound trust to the *paired* Worker.
+2. **Narrow second review of `c8ee52d`.**
+   - **Medium:** the repair did not close the issue. Pairing accepts any server's token, so the paired server is also a setting.
+   - **Hardening:** redirects were followed.
+   - Repaired in the next commit by pinning both endpoints to the app build's Worker and adding `redirect:'error'`.
+   - That final repair was **not** independently re-reviewed, because the package allows one narrow follow-up review. It is covered by unit tests, a negative control that switches the verifier back to the settings address, and the Chromium yes-server scenario.

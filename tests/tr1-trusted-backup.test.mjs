@@ -46,8 +46,8 @@ async function container(w,payload){return JSON.stringify({schema:'spark-signed-
 function wired(w,{paired=true,hook,patch}={}){
   const sent=[];
   const fetch=async(url,init={})=>{
-    const path=new URL(url).pathname;sent.push({path,origin:new URL(url).origin,headers:{...init.headers},body:init.body?JSON.parse(init.body):null});
-    const replaced=hook&&await hook(path);if(replaced)return replaced;
+    const path=new URL(url).pathname;sent.push({path,origin:new URL(url).origin,redirect:init.redirect,headers:{...init.headers},body:init.body?JSON.parse(init.body):null});
+    const replaced=hook&&await hook(path,new URL(url).origin);if(replaced)return replaced;
     const r=await w.b.worker.fetch(new Request(url,{method:init.method,headers:{...init.headers,origin:ORIGIN,'cf-connecting-ip':'192.0.2.1'},body:init.body}),w.env);
     return new Response(await r.text(),{status:r.status,headers:{'content-type':'application/json'}});
   };
@@ -188,10 +188,10 @@ test('TR1 key rotation: current + previous key by id; a retired key reads as "ca
 });
 
 /* ---------- Client restore semantics ---------- */
-test('TR1 11: a valid signed export restores exactly the native authority on another phone paired with the same Worker',async()=>{
+test('TR1 11: a valid signed export restores exactly the native authority on a new, unpaired phone',async()=>{
   const w=await setup(),f=wired(w),native=seedMastery(f);
   const text=await f.app.signedLearningExport();
-  const phone=wired(w,{}),now=Date.now();
+  const phone=wired(w,{paired:false}),now=Date.now();
   const {status,kids}=await phone.app.readLearningCopy(text,now);
   assert.equal(status,'trusted');assert.equal(kids.length,1);
   const m=plain(kids[0].learning);
@@ -200,7 +200,7 @@ test('TR1 11: a valid signed export restores exactly the native authority on ano
   assert.ok(m.skills.add1.retainedAt&&m.skills.add1.independentAt&&m.skills.add1.box>=2);assert.equal(m.skills.add1.helped,'Tallinje');
   assert.deepEqual(m.totals,{cold:2,independentCold:2});assert.ok(m.sessions.every(s=>!s.imported));assert.ok(!m.skills.add1.imported);
   assert.equal(kids[0].name,'Ada');assert.deepEqual(plain(kids[0].notes),['pluss: tierramme hjalp']);
-  // The restore phone sent one verify request, to its paired Worker, without credentials.
+  // The restore phone sent one verify request, to the build's Worker, without credentials.
   assert.deepEqual(phone.sent.map(s=>s.path+' '+s.origin),['/backup/verify '+SERVER]);assert.ok(!('authorization' in phone.sent[0].headers));
   f.dom.window.close();phone.dom.window.close();
 });
@@ -256,9 +256,9 @@ test('TR1 15: verification unavailable, offline or ambiguous never preserves mas
     const r=await phone.app.readLearningCopy(text,now);
     assert.notEqual(r.status,'trusted',String(reply));assert.deepEqual(plain(r.kids[0].learning),quarantined(native,now));phone.dom.window.close();
   }
-  // Server without the secret, and no usable server address.
+  // Server without the secret; and a ⚙️ address elsewhere, which verification ignores.
   const unset=wired({...w,env:{...w.env,EXPORT_SIGNING_SECRET:undefined}},{});assert.equal((await unset.app.readLearningCopy(text,now)).status,'unavailable');
-  const local=wired(w,{});local.app.set("serverUrl='http://example.test'");assert.equal((await local.app.readLearningCopy(text,now)).status,'unpaired');assert.equal(local.sent.length,0);
+  const local=wired(w,{});local.app.set("serverUrl='http://example.test'");assert.equal((await local.app.readLearningCopy(text,now)).status,'trusted');assert.deepEqual(local.sent.map(s=>s.origin),[SERVER]);
   f.dom.window.close();unset.dom.window.close();local.dom.window.close();
 });
 test('TR1 16: a valid signature never bypasses schema, structure, bounds, timestamp or limit validation',async()=>{
@@ -333,8 +333,8 @@ test('TR1 UX: distinguishable restore messages; the export falls back to a clear
   assert.ok(f.app.RESTORE_TEXT.unsigned(1).includes('ikke bekreftet av Spark'));
   assert.ok(f.app.RESTORE_TEXT.invalid(1).startsWith('Advarsel:'));
   assert.ok(f.app.RESTORE_TEXT.unavailable(1).includes('kunne ikke bekrefte'));
-  assert.ok(f.app.RESTORE_TEXT.unpaired(1).includes('koblet til familiens Spark-server'));assert.ok(f.app.RESTORE_TEXT.retired(1).includes('nøkkelen er byttet ut'));
-  assert.equal(new Set(['trusted','unsigned','invalid','unavailable','unpaired','retired'].map(k=>f.app.RESTORE_TEXT[k](1))).size,6);
+  assert.ok(f.app.RESTORE_TEXT.retired(1).includes('nøkkelen er byttet ut'));
+  assert.equal(new Set(['trusted','unsigned','invalid','unavailable','retired'].map(k=>f.app.RESTORE_TEXT[k](1))).size,5);
   // Export: signing refused (no secret) asks before a history-only copy; declining downloads nothing.
   const off=wired({...w,env:{...w.env,EXPORT_SIGNING_SECRET:''}});seedMastery(off);off.app.set("view='setup'");off.app.render();
   const downloads=[];off.w.URL.createObjectURL=blob=>{downloads.push(blob);return 'blob:x';};off.w.URL.revokeObjectURL=()=>{};
@@ -346,19 +346,32 @@ test('TR1 UX: distinguishable restore messages; the export falls back to a clear
   f.dom.window.close();off.dom.window.close();
 });
 
-test('TR1 trust root: only the Worker this phone is paired with can confirm; unpaired or re-pointed phones send nothing',async()=>{
+// A hand-written file with retained mastery that nobody signed: correct digest, made-up MAC.
+async function unsignedForgery(now){
+  const file={schema:'spark-signed-backup-v1',payload:craftedPayload({ev:[ev(T0,{k:'task',delayed:false}),ev(T0+2*DAY),ev(T0+10*DAY)],box:3,due:T0+20*DAY,independentAt:T0,firstColdAt:T0+2*DAY,retainedAt:T0+10*DAY}),signature:{protocol:'SPARK-EXPORT-V1',digestAlg:'SHA-256',sigAlg:'HMAC-SHA-256',kid:'k1',signedAt:now,digest:'',mac:'A'.repeat(43)}};
+  file.signature.digest=await digestOf(file.payload);return JSON.stringify(file);
+}
+// The phone is re-pointed in ⚙️ and paired with a server that hands out a token and confirms everything.
+const EVIL='https://evil.example',evilYes=async(path,origin)=>origin===EVIL?(path==='/pair'?Response.json({token:'evil'}):Response.json({valid:true})):undefined;
+const pairEvil=p=>p.app.set(`serverUrl='${EVIL}';tokenServer='${EVIL}';deviceToken='evil'`);
+test('TR1 trust root: only the build\'s Worker confirms, never a server chosen or paired in settings',async()=>{
   const w=await setup(),src=wired(w),native=seedMastery(src),text=await src.app.signedLearningExport(),now=Date.now();
-  const yes=async()=>Response.json({valid:true});
-  // New phone, never paired (default server address): no request, history only, its own prompt.
-  const fresh=wired(w,{paired:false,hook:yes});let r=await fresh.app.readLearningCopy(text,now);
-  assert.equal(r.status,'unpaired');assert.equal(fresh.sent.length,0);assert.deepEqual(plain(r.kids[0].learning),quarantined(native,now));
-  // Paired phone whose ⚙️ address was changed (token kept): no request to the new address.
-  const moved=wired(w,{hook:yes});moved.app.set("serverUrl='https://evil.example'");r=await moved.app.readLearningCopy(text,now);
-  assert.equal(r.status,'unpaired');assert.equal(moved.sent.length,0);
-  // Another family's Worker (its own key) never confirms this family's file.
-  const other=await setup({EXPORT_SIGNING_SECRET:OTHER}),foreign=wired(other);r=await foreign.app.readLearningCopy(text,now);
-  assert.equal(r.status,'invalid');assert.equal(L.state(r.kids[0].learning.skills.add1),'ØVER');
-  for(const p of [src,fresh,moved,foreign])p.dom.window.close();
+  // New phone, never paired: restores trusted before pairing, by asking the build's Worker without credentials.
+  const fresh=wired(w,{paired:false});let r=await fresh.app.readLearningCopy(text,now);
+  assert.equal(r.status,'trusted');assert.deepEqual(plain(r.kids[0].learning),plain(L.normalizeMemory(native)));
+  assert.deepEqual(fresh.sent.map(s=>[s.path,s.origin,s.redirect]),[['/backup/verify',SERVER,'error']]);
+  // Phone paired with a server that always says yes: a forged file still goes to the build's Worker, which refuses it.
+  const evil=wired(w,{hook:evilYes});pairEvil(evil);
+  r=await evil.app.readLearningCopy(await unsignedForgery(now),now);
+  assert.equal(r.status,'invalid');assert.notEqual(L.state(r.kids[0].learning.skills.add1),'SITTER');
+  assert.ok(evil.sent.every(s=>s.origin===SERVER));
+  // ...and a genuine file still restores, and that phone cannot mint a "confirmed" file through its own server.
+  assert.equal((await evil.app.readLearningCopy(text,now)).status,'trusted');
+  await assert.rejects(evil.app.signedLearningExport());assert.ok(evil.sent.every(s=>s.origin===SERVER&&s.path==='/backup/verify'));
+  // A signature from another Worker key never verifies at the build's Worker.
+  const other=await setup({EXPORT_SIGNING_SECRET:OTHER}),foreignSrc=wired(other);seedMastery(foreignSrc);
+  r=await fresh.app.readLearningCopy(await foreignSrc.app.signedLearningExport(),now);assert.equal(r.status,'invalid');
+  for(const p of [src,fresh,evil,foreignSrc])p.dom.window.close();
 });
 
 /* ---------- Negative controls: each trust check above is load-bearing ---------- */
@@ -392,16 +405,11 @@ test('TR1 NC: a loose reply check would trust an ambiguous verifier reply',async
   const r=await broken.app.readLearningCopy(text);assert.equal(r.status,'trusted');assert.equal(L.state(r.kids[0].learning.skills.add1),'SITTER');
   src.dom.window.close();safe.dom.window.close();broken.dom.window.close();
 });
-test('TR1 NC: without the paired-Worker binding any server address could confirm a forged file',async()=>{
-  const w=await setup(),now=Date.now();
-  // A hand-written file with retained mastery that nobody signed; the ⚙️ server address points at a server that always says yes.
-  const file={schema:'spark-signed-backup-v1',payload:craftedPayload({ev:[ev(T0,{k:'task',delayed:false}),ev(T0+2*DAY),ev(T0+10*DAY)],box:3,due:T0+20*DAY,independentAt:T0,firstColdAt:T0+2*DAY,retainedAt:T0+10*DAY}),signature:{protocol:'SPARK-EXPORT-V1',digestAlg:'SHA-256',sigAlg:'HMAC-SHA-256',kid:'k1',signedAt:now,digest:'',mac:'A'.repeat(43)}};
-  file.signature.digest=await digestOf(file.payload);const text=JSON.stringify(file);
-  const yes=async()=>Response.json({valid:true});
-  const safe=wired(w,{hook:yes});safe.app.set("serverUrl='https://evil.example'");
-  assert.equal((await safe.app.readLearningCopy(text,now)).status,'unpaired');assert.equal(safe.sent.length,0);
-  const broken=wired(w,{hook:yes,patch:cut("if(!paired()||!validServer(tokenServer))return 'unpaired';","")});broken.app.set("serverUrl='https://evil.example'");
-  const r=await broken.app.readLearningCopy(text,now);assert.equal(r.status,'trusted');assert.equal(L.state(r.kids[0].learning.skills.add1),'SITTER');assert.equal(broken.sent[0].origin,'https://evil.example');
+test('TR1 NC: a settings-chosen verifier (the paired server) would confirm a forged file',async()=>{
+  const w=await setup(),now=Date.now(),text=await unsignedForgery(now);
+  const safe=wired(w,{hook:evilYes});pairEvil(safe);assert.equal((await safe.app.readLearningCopy(text,now)).status,'invalid');
+  const broken=wired(w,{hook:evilYes,patch:cut('const backupServer=()=>DEFAULT_SERVER_URL;','const backupServer=()=>serverUrl;')});pairEvil(broken);
+  const r=await broken.app.readLearningCopy(text,now);assert.equal(r.status,'trusted');assert.equal(L.state(r.kids[0].learning.skills.add1),'SITTER');assert.equal(broken.sent[0].origin,EVIL);
   safe.dom.window.close();broken.dom.window.close();
 });
 test('TR1 NC: ignoring the verification result would restore mastery from a forged signature',async()=>{

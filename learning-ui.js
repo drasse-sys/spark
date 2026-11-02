@@ -266,23 +266,26 @@ async function exportDigest(payload){
   let s='';for(const b of bytes)s+=String.fromCharCode(b);
   return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 }
+// Trust root: the Worker this app build ships with. Never the ⚙️ address, and never "the server this phone paired with":
+// both are unprotected settings, and pairing accepts any server's token, so either could name a server answering {valid:true}.
+// A family running its own build sets its own Worker in DEFAULT_SERVER_URL. Other servers (development) give history-only copies.
+const backupServer=()=>DEFAULT_SERVER_URL;
 async function backupRequest(path,body,auth){
-  const r=await fetchServer(path,{method:'POST',headers:{'content-type':'application/json',...(auth?{authorization:'Bearer '+deviceToken}:{})},body:JSON.stringify(body)});
+  // A redirect could hand the answer to another origin, so none is followed.
+  const r=await fetchServer(path,{method:'POST',redirect:'error',headers:{'content-type':'application/json',...(auth?{authorization:'Bearer '+deviceToken}:{})},body:JSON.stringify(body)},backupServer());
   return {r,d:await r.json().catch(()=>null)};
 }
-// Signed container text, or an Error when signing is unavailable (not paired, offline, secret missing, bad reply).
+// Signed container text, or an Error when signing is unavailable (not paired with the build's Worker, offline, secret missing, bad reply).
 async function signedLearningExport(){
-  if(!paired())throw Error('Denne enheten er ikke koblet til Spark-serveren.');
+  if(!paired()||serverUrl!==backupServer())throw Error('Denne enheten er ikke koblet til Spark-serveren.');
   const payload=JSON.stringify(learningExport()),digest=await exportDigest(payload);
   const {r,d}=await backupRequest('/backup/sign',{v:1,digest},true);
   if(!r.ok||!validSignature(d)||d.digest!==digest)throw Error(d?.error||'Spark kunne ikke bekrefte kopien.');
   return JSON.stringify({schema:SIGNED_BACKUP,payload,signature:d});
 }
-// The trust root is the Worker this phone is paired with (pairing proved that family's code to it). A server address
-// alone (⚙️, or the default on a new phone) never confirms: it could be any server answering {valid:true}.
+// Asks only the build's Worker, paired or not, whatever ⚙️ says. Verification needs no credentials, so a new phone can restore first.
 // 'trusted' only on an explicit {valid:true}. Any other reply, network failure or timeout is not a confirmation.
 async function verifyBackup(signature,digest){
-  if(!paired()||!validServer(tokenServer))return 'unpaired';
   try{
     const {r,d}=await backupRequest('/backup/verify',{v:1,...signature,digest},false);
     if(r.status===200&&exactKeys(d,['valid'])&&d.valid===true)return 'trusted';
@@ -308,7 +311,6 @@ const RESTORE_TEXT={
   unsigned:n=>'Denne kopien er ikke bekreftet av Spark.\nLegge til '+n+' profiler som historikk? Ferdighetene bekreftes på nytt på denne enheten. Eksisterende barn beholdes.',
   invalid:n=>'Advarsel: Kopien er endret etter at den ble laget, eller bekreftelsen er ugyldig.\nDen kan bare legges til som historikk, og ferdighetene må bekreftes på nytt. Legge til '+n+' profiler som historikk?',
   unavailable:n=>'Spark kunne ikke bekrefte kopien nå (ingen kontakt med Spark-serveren).\nAvbryt for å prøve igjen senere, eller legg til '+n+' profiler som historikk nå. Ferdighetene må da bekreftes på nytt. Legge til som historikk nå?',
-  unpaired:n=>'Kopien kan bare bekreftes når denne telefonen er koblet til familiens Spark-server.\nAvbryt, koble telefonen i ⚙️ og gjenopprett på nytt for å beholde ferdighetene, eller legg til '+n+' profiler som historikk nå. Legge til som historikk nå?',
   retired:n=>'Spark-serveren kan ikke lenger bekrefte denne kopien (signeringsnøkkelen er byttet ut).\nDen kan legges til som historikk, og ferdighetene må bekreftes på nytt. Legge til '+n+' profiler som historikk?'
 };
 function downloadText(text,name){const url=URL.createObjectURL(new Blob([text],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}

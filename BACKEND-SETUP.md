@@ -132,7 +132,7 @@ npx wrangler secret put GROQ_API_KEY
 
 Uten denne hemmeligheten fungerer alt som før: læringskopier lastes ned ubekreftet og gjenopprettes som historikk, og ferdighetene bekreftes på nytt på den nye telefonen.
 
-Med hemmeligheten blir kopien fra en paret telefon bekreftet av Spark-serveren. Den kan da gjenopprettes med ferdighetsnivåene i behold på en ny telefon som først er koblet til den samme serveren. Serveren får bare et sjekksum-fingeravtrykk av kopien, aldri selve innholdet.
+Med hemmeligheten blir kopien fra en paret telefon bekreftet av Spark-serveren. Den kan da gjenopprettes med ferdighetsnivåene i behold på en ny telefon. Bekreftelsen gjøres alltid av serveren som er bygd inn i appen (`DEFAULT_SERVER_URL`), aldri av en adresse fra innstillingene. Bruker familien sin egen kopi av appen, må den adressen peke på familiens egen Worker. Serveren får bare et sjekksum-fingeravtrykk av kopien, aldri selve innholdet.
 
 ```powershell
 python -c "import secrets; print(secrets.token_urlsafe(48))"
