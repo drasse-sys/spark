@@ -132,14 +132,14 @@ npx wrangler secret put GROQ_API_KEY
 
 Uten denne hemmeligheten fungerer alt som før: læringskopier lastes ned ubekreftet og gjenopprettes som historikk, og ferdighetene bekreftes på nytt på den nye telefonen.
 
-Med hemmeligheten blir kopien fra en paret telefon bekreftet av Spark-serveren. Den kan da gjenopprettes på en ny telefon med ferdighetsnivåene i behold. Serveren får bare et sjekksum-fingeravtrykk av kopien, aldri selve innholdet.
+Med hemmeligheten blir kopien fra en paret telefon bekreftet av Spark-serveren. Den kan da gjenopprettes med ferdighetsnivåene i behold på en ny telefon som først er koblet til den samme serveren. Serveren får bare et sjekksum-fingeravtrykk av kopien, aldri selve innholdet.
 
 ```powershell
 python -c "import secrets; print(secrets.token_urlsafe(48))"
 npx wrangler secret put EXPORT_SIGNING_SECRET
 ```
 
-Bruk en ny, lang verdi (minst 32 tegn) som ikke er lik noen annen Spark-hemmelighet. Ta vare på den: bytter du den uten å beholde den gamle som `EXPORT_PREVIOUS_SECRET`, kan eldre kopier bare gjenopprettes som historikk. En bekreftet kopi er som en nøkkel til barnets læringshistorikk. Alle som har filen kan gjenopprette den, så oppbevar den like trygt som andre private filer. Detaljer: `docs/2026-11-02-SPARK-TR1-Trusted-Backup-Restore.md`.
+Bruk en ny, lang verdi (minst 32 tegn) som ikke er lik noen annen Spark-hemmelighet. Ta vare på den. Bytter du den uten å beholde den gamle som `EXPORT_PREVIOUS_SECRET` (med `EXPORT_PREVIOUS_KID`), kan eldre kopier bare gjenopprettes som historikk, og de vises som «endret». Ved bytte: legg den gamle verdien i `EXPORT_PREVIOUS_SECRET` med `EXPORT_PREVIOUS_KID=k1`, og sett den nye med `EXPORT_SIGNING_KID=k2`. En bekreftet kopi er som en nøkkel til barnets læringshistorikk. Alle som har filen kan gjenopprette den, så oppbevar den like trygt som andre private filer. Detaljer: `docs/2026-11-02-SPARK-TR1-Trusted-Backup-Restore.md`.
 
 ## 7. Hvis en telefon blir borte
 

@@ -161,7 +161,8 @@
     memory.totals={cold:0,independentCold:0};
     return memory;
   }
-  // TR1: a copy the family's Worker signed keeps the authority native local state can hold, never more.
+  // TR1: a copy the family's Worker signed keeps the fields native local state holds, within native bounds and these
+  // necessary (not sufficient) consistency checks; `ev` is truncated natively, so a full replay of box/checkpoints is impossible.
   // Input must already be `normalizeMemory` output (bounds, enums, limits). `signedAt` is the Worker's clock, the only
   // trusted time in the file: authority claimed after it (+CLOCK_SKEW), or authority without the verified evidence that
   // `event` always leaves behind, cannot be the signed device's own state, so that skill, word or session alone is quarantined.
@@ -174,8 +175,11 @@
       const consistent=(r.ev.length>0||r.box<=1&&!r.independentAt&&!r.firstColdAt&&!r.retainedAt)&&(!r.retainedAt&&!r.firstColdAt||!!r.independentAt);
       if(!times.every(ok)||!dueOk(r.due)||!consistent)quarantineSkill(r,now);
     }
-    for(const w of memory.items)if(!ok(w.lastAt)||!dueOk(w.due)||!w.ev.every(e=>ok(e.t)))quarantineWord(w,now);
+    // A word above box 1 has been reviewed, which always leaves review evidence.
+    for(const w of memory.items)if(!ok(w.lastAt)||!dueOk(w.due)||!w.ev.every(e=>ok(e.t))||w.box>1&&!w.ev.length)quarantineWord(w,now);
     for(const s of memory.sessions)if(![s.startedAt,s.endedAt,...s.interactions,...s.events.map(e=>e.t)].every(ok))s.imported=true;
+    // Delayed-check credit is earned only with verified evidence; with none left, the totals restart as in quarantine.
+    if(!Object.values(memory.skills).some(r=>r.ev.length))memory.totals={cold:0,independentCold:0};
     return memory;
   }
   function prune(k,now){

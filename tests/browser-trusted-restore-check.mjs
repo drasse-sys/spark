@@ -65,8 +65,8 @@ try{
   assert.deepEqual(Object.keys(JSON.parse(signReq.body)).sort(),['digest','v']);assert.ok(!signReq.body.includes('Ada'));assert.ok(signReq.headers.authorization?.startsWith('Bearer '));
   const unsignedText=await a.page.evaluate(()=>JSON.stringify(learningExport()));
 
-  // 2. New, unpaired phone: signed restore keeps mastery; tampered and legacy copies restore as history only.
-  const b=await phone(false);await openParent(b.page);
+  // 2. Second phone paired with the same Worker: signed restore keeps mastery; tampered and legacy copies restore as history only.
+  const b=await phone(true);await openParent(b.page);
   async function restore(p,text,expectKids){
     const n=p.dialogs.length;await p.page.locator('#importLearning').setInputFiles({name:'kopi.json',mimeType:'application/json',buffer:Buffer.from(text)});
     await expectDialog(p,n);if(expectKids!==undefined)await p.page.waitForFunction(k=>kids.length===k,expectKids);
@@ -96,13 +96,19 @@ try{
   assert.ok(message.includes('ikke bekreftet av Spark'),message);assert.equal(await b.page.evaluate(()=>L.state(kids.at(-1).learning.skills.add1)),'ØVER');
 
   // 3. Verification endpoint unreachable: never trusted. Cancel leaves storage untouched; accepting adds history only.
-  const c=await phone(false,env,{offline:true});await openParent(c.page);
+  const c=await phone(true,env,{offline:true});await openParent(c.page);
   const before=await c.page.evaluate(()=>[kids.length,localStorage.getItem('spark_kids')]);
   c.decide(()=>false);message=await restore(c,signedFile.text);
   assert.ok(message.includes('kunne ikke bekrefte'),message);
   assert.deepEqual(await c.page.evaluate(()=>[kids.length,localStorage.getItem('spark_kids')]),before);
   c.decide(()=>true);await restore(c,signedFile.text,before[0]+1);
   assert.equal(await c.page.evaluate(()=>L.state(kids.at(-1).learning.skills.add1)),'ØVER');
+
+  // 3b. Never-paired phone: no verify request at all, its own prompt, history only.
+  const e=await phone(false);await openParent(e.page);const sentBefore=requests.length;
+  message=await restore(e,signedFile.text,await e.page.evaluate(()=>kids.length+1));
+  assert.ok(message.includes('koblet til familiens Spark-server'),message);assert.equal(requests.length,sentBefore);
+  assert.equal(await e.page.evaluate(()=>L.state(kids.at(-1).learning.skills.add1)),'ØVER');
 
   // 4. Signing unavailable (no EXPORT_SIGNING_SECRET): the parent is asked, then gets a history-only copy.
   const d=await phone(true,{...env,EXPORT_SIGNING_SECRET:undefined});await openParent(d.page);
@@ -112,6 +118,6 @@ try{
   for(const secret of [token,SECRET,'spark_device_token','Bearer'])assert.ok(!fallback.text.includes(secret),secret);
 
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({result:'PASS',checks:['signed export via page Web Crypto','digest parity browser/Node','no secrets in signed or fallback file','sign request digest-only','unpaired signed restore keeps SITTER','verify request digest+signature only, no credentials','tampered payload caught locally','re-digested forgery refused by Worker','legacy unsigned quarantined','verify offline: cancel untouched, accept history-only','signing unavailable fallback'],backupRequests:requests.length,pageErrors:errors,screenshot:'tests/artifacts/tr1-trusted-restore.png'}));
-  for(const p of [a,b,c,d])await p.context.close();
+  console.log(JSON.stringify({result:'PASS',checks:['signed export via page Web Crypto','digest parity browser/Node','no secrets in signed or fallback file','sign request digest-only','paired second phone signed restore keeps SITTER','verify request digest+signature only, no credentials','tampered payload caught locally','re-digested forgery refused by Worker','legacy unsigned quarantined','verify offline: cancel untouched, accept history-only','never-paired phone: no request, history only','signing unavailable fallback'],backupRequests:requests.length,pageErrors:errors,screenshot:'tests/artifacts/tr1-trusted-restore.png'}));
+  for(const p of [a,b,c,d,e])await p.context.close();
 }finally{await browser?.close();await new Promise(r=>server.close(r));}

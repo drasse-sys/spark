@@ -46,7 +46,7 @@ async function container(w,payload){return JSON.stringify({schema:'spark-signed-
 function wired(w,{paired=true,hook,patch}={}){
   const sent=[];
   const fetch=async(url,init={})=>{
-    const path=new URL(url).pathname;sent.push({path,headers:{...init.headers},body:init.body?JSON.parse(init.body):null});
+    const path=new URL(url).pathname;sent.push({path,origin:new URL(url).origin,headers:{...init.headers},body:init.body?JSON.parse(init.body):null});
     const replaced=hook&&await hook(path);if(replaced)return replaced;
     const r=await w.b.worker.fetch(new Request(url,{method:init.method,headers:{...init.headers,origin:ORIGIN,'cf-connecting-ip':'192.0.2.1'},body:init.body}),w.env);
     return new Response(await r.text(),{status:r.status,headers:{'content-type':'application/json'}});
@@ -117,7 +117,7 @@ test('TR1 6: a signature made under another key does not verify (isolated key fi
   assert.equal(await a.b.api.verifyExport(OTHER,sig.kid,sig.signedAt,sig.digest,sig.mac),false);
   assert.equal(await a.b.api.verifyExport(SECRET,sig.kid,sig.signedAt,sig.digest,sig.mac),true);
 });
-test('TR1 7: malformed digests, signatures and fields are rejected before any crypto',async()=>{
+test('TR1 7: malformed digests, signatures and fields are rejected with 400',async()=>{
   const w=await setup(),sig=await signed(w,await digestOf('p'));
   const badB64=[sig.digest.slice(0,-1)+'B',sig.digest+'A',sig.digest.slice(1),sig.digest+'=','+'+sig.digest.slice(1),'/'+sig.digest.slice(1),'a'.repeat(64),'',42,null,['x']];
   for(const digest of badB64)assert.equal((await sign(w,digest)).status,400,String(digest));
@@ -177,16 +177,21 @@ test('TR1 key rotation: current + previous key by id; a retired key reads as "ca
   assert.deepEqual(await (await verify(rotated,{...oldSig,kid:'k2'})).json(),{valid:false,reason:'signature'});
   const retired=await setup({EXPORT_SIGNING_KID:'k2',EXPORT_SIGNING_SECRET:OTHER});
   assert.deepEqual(await (await verify(retired,oldSig)).json(),{valid:false,reason:'key'});
+  // Rotation that kept the id: the previous key with the same kid still verifies old backups.
+  const sameKid=await setup({EXPORT_SIGNING_SECRET:OTHER,EXPORT_PREVIOUS_KID:'k1',EXPORT_PREVIOUS_SECRET:SECRET});
+  assert.deepEqual(await (await verify(sameKid,oldSig)).json(),{valid:true});assert.equal((await signed(sameKid,digest)).kid,'k1');
+  // Current secret unusable: never falls back to signing with the previous key.
+  assert.equal((await sign(await setup({EXPORT_SIGNING_SECRET:'short',EXPORT_PREVIOUS_KID:'k1',EXPORT_PREVIOUS_SECRET:SECRET}),digest)).status,503);
   const f=wired(retired);const g=wired(old);seedMastery(g);const text=await g.app.signedLearningExport();
-  assert.equal((await f.app.readLearningCopy(text)).status,'unavailable');
+  assert.equal((await f.app.readLearningCopy(text)).status,'retired');
   f.dom.window.close();g.dom.window.close();
 });
 
 /* ---------- Client restore semantics ---------- */
-test('TR1 11: a valid signed export restores exactly the native authority, on a new unpaired phone',async()=>{
+test('TR1 11: a valid signed export restores exactly the native authority on another phone paired with the same Worker',async()=>{
   const w=await setup(),f=wired(w),native=seedMastery(f);
   const text=await f.app.signedLearningExport();
-  const phone=wired(w,{paired:false}),now=Date.now();
+  const phone=wired(w,{}),now=Date.now();
   const {status,kids}=await phone.app.readLearningCopy(text,now);
   assert.equal(status,'trusted');assert.equal(kids.length,1);
   const m=plain(kids[0].learning);
@@ -195,8 +200,8 @@ test('TR1 11: a valid signed export restores exactly the native authority, on a 
   assert.ok(m.skills.add1.retainedAt&&m.skills.add1.independentAt&&m.skills.add1.box>=2);assert.equal(m.skills.add1.helped,'Tallinje');
   assert.deepEqual(m.totals,{cold:2,independentCold:2});assert.ok(m.sessions.every(s=>!s.imported));assert.ok(!m.skills.add1.imported);
   assert.equal(kids[0].name,'Ada');assert.deepEqual(plain(kids[0].notes),['pluss: tierramme hjalp']);
-  // The restore phone sent one verify request, without credentials.
-  assert.deepEqual(phone.sent.map(s=>s.path),['/backup/verify']);assert.ok(!('authorization' in phone.sent[0].headers));
+  // The restore phone sent one verify request, to its paired Worker, without credentials.
+  assert.deepEqual(phone.sent.map(s=>s.path+' '+s.origin),['/backup/verify '+SERVER]);assert.ok(!('authorization' in phone.sent[0].headers));
   f.dom.window.close();phone.dom.window.close();
 });
 test('TR1 12: an unsigned export quarantines exactly as the CF1 release did',async()=>{
@@ -226,7 +231,7 @@ test('TR1 14: a tampered or invalid-signature copy cannot preserve mastery',asyn
   const text=await f.app.signedLearningExport(),file=JSON.parse(text);
   // Edited payload, original envelope: caught locally, before any request.
   const edited={...file,payload:file.payload.replace('"Ada"','"Adb"')};
-  const phone=wired(w,{paired:false});let r=await phone.app.readLearningCopy(JSON.stringify(edited),now);
+  const phone=wired(w,{});let r=await phone.app.readLearningCopy(JSON.stringify(edited),now);
   assert.equal(r.status,'invalid');assert.equal(phone.sent.length,0);assert.deepEqual(plain(r.kids[0].learning),quarantined(native,now));
   // Edited payload with its digest recomputed: the Worker refuses the MAC.
   const redigested={...edited,signature:{...file.signature,digest:await digestOf(edited.payload)}};
@@ -247,17 +252,17 @@ test('TR1 15: verification unavailable, offline or ambiguous never preserves mas
     ()=>Response.json({valid:'true'}),()=>Response.json({valid:1}),()=>Response.json({valid:true,extra:1}),()=>new Response('null'),()=>Response.json([true]),
     ()=>Response.json({valid:false,reason:'key'}),()=>Response.json({valid:false}),()=>Response.json({valid:true},{status:201})];
   for(const reply of replies){
-    const phone=wired(w,{paired:false,hook:async path=>path==='/backup/verify'?reply():undefined});
+    const phone=wired(w,{hook:async path=>path==='/backup/verify'?reply():undefined});
     const r=await phone.app.readLearningCopy(text,now);
     assert.notEqual(r.status,'trusted',String(reply));assert.deepEqual(plain(r.kids[0].learning),quarantined(native,now));phone.dom.window.close();
   }
   // Server without the secret, and no usable server address.
-  const unset=wired({...w,env:{...w.env,EXPORT_SIGNING_SECRET:undefined}},{paired:false});assert.equal((await unset.app.readLearningCopy(text,now)).status,'unavailable');
-  const local=wired(w,{paired:false});local.app.set("serverUrl='http://example.test'");assert.equal((await local.app.readLearningCopy(text,now)).status,'unavailable');assert.equal(local.sent.length,0);
+  const unset=wired({...w,env:{...w.env,EXPORT_SIGNING_SECRET:undefined}},{});assert.equal((await unset.app.readLearningCopy(text,now)).status,'unavailable');
+  const local=wired(w,{});local.app.set("serverUrl='http://example.test'");assert.equal((await local.app.readLearningCopy(text,now)).status,'unpaired');assert.equal(local.sent.length,0);
   f.dom.window.close();unset.dom.window.close();local.dom.window.close();
 });
 test('TR1 16: a valid signature never bypasses schema, structure, bounds, timestamp or limit validation',async()=>{
-  const w=await setup(),phone=wired(w,{paired:false}),now=Date.now();
+  const w=await setup(),phone=wired(w,{}),now=Date.now();
   const refused=[[craftedPayload({ev:[ev(T0)]}).replace('"add1"','"hacking"'),/Ukjent ferdighet/],[craftedPayload({ev:[ev(T0,{sid:''})]}),/Ugyldig læringshendelse/],[craftedPayload({ev:[ev(T0)]},{age:99}),/Ugyldig profil/],[craftedPayload({ev:[ev(T0)]}).replace('"version":3','"version":4'),/Ugyldig profil/],
     [craftedPayload({ev:[]}).replace('spark-learning-export-v3','spark-learning-export-v2'),/Ukjent format/],[JSON.stringify({schema:'spark-learning-export-v3',kids:Array(21).fill(JSON.parse(craftedPayload({ev:[]})).kids[0])}),/Ukjent format/],
     [craftedPayload({ev:'x'}),/Ukjent ferdighet/]];
@@ -278,6 +283,12 @@ test('TR1 16: a valid signature never bypasses schema, structure, bounds, timest
   k=await restore({imported:[ev(T0),ev(T0+2*DAY),ev(T0+10*DAY)]});assert.equal(k.learning.skills.add1.ev.length,0);assert.equal(L.state(k.learning.skills.add1),'ØVER');
   const totals=JSON.parse(craftedPayload({ev:[ev(T0,{k:'task',delayed:false})]}));totals.kids[0].learning.totals={cold:5,independentCold:9};
   k=(await phone.app.readLearningCopy(await container(w,JSON.stringify(totals)),now)).kids[0];assert.deepEqual(plain(k.learning.totals),{cold:5,independentCold:5});
+  // Credit with no surviving evidence restarts; a reviewed word box needs review evidence; signed observations are replayed too.
+  const orphan=JSON.parse(craftedPayload({box:5,due:T0,imported:[ev(T0)]}));orphan.kids[0].learning.totals={cold:9,independentCold:9};
+  orphan.kids[0].learning.items=[{id:'w',word:'hus',meaning:'x',box:5,due:now+DAY,lastAt:T0,ev:[]},{id:'v',word:'tre',meaning:'y',box:3,due:now+DAY,lastAt:T0,ev:[{t:T0,s:0,ok:true,delayed:true}]}];
+  k=(await phone.app.readLearningCopy(await container(w,JSON.stringify(orphan)),now)).kids[0];
+  assert.deepEqual(plain(k.learning.totals),{cold:0,independentCold:0});assert.equal(k.learning.items[0].box,1);assert.equal(k.learning.items[1].box,3);
+  await assert.rejects(phone.app.readLearningCopy(await container(w,craftedPayload({ev:[ev(T0)],observations:[ev(T0+DAY,{verified:true,sid:''})]})),now),/Ugyldig læringshendelse/);
   phone.dom.window.close();
 });
 test('TR1 17: neither the signed nor the fallback backup carries pairing, device, provider or Worker secrets',async()=>{
@@ -295,7 +306,7 @@ test('TR1 17: neither the signed nor the fallback backup carries pairing, device
 test('TR1 18: the import control commits nothing before the trust decision and the parent choice; a failed save rolls back',async()=>{
   const w=await setup(),src=wired(w);seedMastery(src);const text=await src.app.signedLearningExport();src.dom.window.close();
   let release;const gate=new Promise(r=>release=r);
-  const f=wired(w,{paired:false,hook:async path=>{if(path==='/backup/verify')await gate;}});
+  const f=wired(w,{hook:async path=>{if(path==='/backup/verify')await gate;}});
   const confirms=[];let answer=false;f.w.confirm=m=>{confirms.push(m);return answer;};
   f.app.set("view='setup'");f.app.render();
   const input=()=>{const el=f.w.document.getElementById('importLearning');Object.defineProperty(el,'files',{value:[{size:text.length,text:async()=>text}],configurable:true});return el;};
@@ -316,13 +327,14 @@ test('TR1 18: the import control commits nothing before the trust decision and t
   const n=confirms.length;await bad.onchange({target:bad});assert.equal(confirms.length,n);assert.equal(f.app.state().kids.length,saved[1]);
   f.dom.window.close();
 });
-test('TR1 UX: four distinguishable restore messages; the export falls back to a clearly unconfirmed copy',async()=>{
+test('TR1 UX: distinguishable restore messages; the export falls back to a clearly unconfirmed copy',async()=>{
   const w=await setup(),f=wired(w);seedMastery(f);
   assert.ok(f.app.RESTORE_TEXT.trusted(1).startsWith('Denne sikkerhetskopien er bekreftet av Spark.'));
   assert.ok(f.app.RESTORE_TEXT.unsigned(1).includes('ikke bekreftet av Spark'));
   assert.ok(f.app.RESTORE_TEXT.invalid(1).startsWith('Advarsel:'));
   assert.ok(f.app.RESTORE_TEXT.unavailable(1).includes('kunne ikke bekrefte'));
-  assert.equal(new Set(['trusted','unsigned','invalid','unavailable'].map(k=>f.app.RESTORE_TEXT[k](1))).size,4);
+  assert.ok(f.app.RESTORE_TEXT.unpaired(1).includes('koblet til familiens Spark-server'));assert.ok(f.app.RESTORE_TEXT.retired(1).includes('nøkkelen er byttet ut'));
+  assert.equal(new Set(['trusted','unsigned','invalid','unavailable','unpaired','retired'].map(k=>f.app.RESTORE_TEXT[k](1))).size,6);
   // Export: signing refused (no secret) asks before a history-only copy; declining downloads nothing.
   const off=wired({...w,env:{...w.env,EXPORT_SIGNING_SECRET:''}});seedMastery(off);off.app.set("view='setup'");off.app.render();
   const downloads=[];off.w.URL.createObjectURL=blob=>{downloads.push(blob);return 'blob:x';};off.w.URL.revokeObjectURL=()=>{};
@@ -332,6 +344,21 @@ test('TR1 UX: four distinguishable restore messages; the export falls back to a 
   off.w.confirm=()=>true;await off.w.document.getElementById('exportLearning').onclick({currentTarget:off.w.document.getElementById('exportLearning')});
   assert.equal(downloads.length,1);assert.equal(JSON.parse(await downloads[0].text()).schema,'spark-learning-export-v3');
   f.dom.window.close();off.dom.window.close();
+});
+
+test('TR1 trust root: only the Worker this phone is paired with can confirm; unpaired or re-pointed phones send nothing',async()=>{
+  const w=await setup(),src=wired(w),native=seedMastery(src),text=await src.app.signedLearningExport(),now=Date.now();
+  const yes=async()=>Response.json({valid:true});
+  // New phone, never paired (default server address): no request, history only, its own prompt.
+  const fresh=wired(w,{paired:false,hook:yes});let r=await fresh.app.readLearningCopy(text,now);
+  assert.equal(r.status,'unpaired');assert.equal(fresh.sent.length,0);assert.deepEqual(plain(r.kids[0].learning),quarantined(native,now));
+  // Paired phone whose ⚙️ address was changed (token kept): no request to the new address.
+  const moved=wired(w,{hook:yes});moved.app.set("serverUrl='https://evil.example'");r=await moved.app.readLearningCopy(text,now);
+  assert.equal(r.status,'unpaired');assert.equal(moved.sent.length,0);
+  // Another family's Worker (its own key) never confirms this family's file.
+  const other=await setup({EXPORT_SIGNING_SECRET:OTHER}),foreign=wired(other);r=await foreign.app.readLearningCopy(text,now);
+  assert.equal(r.status,'invalid');assert.equal(L.state(r.kids[0].learning.skills.add1),'ØVER');
+  for(const p of [src,fresh,moved,foreign])p.dom.window.close();
 });
 
 /* ---------- Negative controls: each trust check above is load-bearing ---------- */
@@ -352,31 +379,44 @@ test('TR1 NC: without the local digest comparison an edited payload would restor
   // Manufacture mastery: sub1 claims retention it never had.
   const learning=JSON.parse(file.payload);learning.kids[0].learning.skills.sub1.retainedAt=T0+30*DAY;learning.kids[0].learning.skills.sub1.independentAt=T0;
   const forged=JSON.stringify({...file,payload:JSON.stringify(learning)});
-  const safe=wired(w,{paired:false});assert.equal((await safe.app.readLearningCopy(forged)).status,'invalid');
-  const broken=wired(w,{paired:false,patch:cut('if(digest&&digest===data.signature.digest)status=await verifyBackup(data.signature,digest);','status=await verifyBackup(data.signature,data.signature.digest);')});
+  const safe=wired(w,{});assert.equal((await safe.app.readLearningCopy(forged)).status,'invalid');
+  const broken=wired(w,{patch:cut('if(digest&&digest===data.signature.digest)status=await verifyBackup(data.signature,digest);','status=await verifyBackup(data.signature,data.signature.digest);')});
   const r=await broken.app.readLearningCopy(forged);assert.equal(r.status,'trusted');assert.equal(r.kids[0].learning.skills.sub1.retainedAt,T0+30*DAY);
   src.dom.window.close();safe.dom.window.close();broken.dom.window.close();
 });
-test('TR1 NC: a fail-open verifier would restore mastery while offline',async()=>{
+test('TR1 NC: a loose reply check would trust an ambiguous verifier reply',async()=>{
   const w=await setup(),src=wired(w);seedMastery(src);const text=await src.app.signedLearningExport();
-  const offline=async path=>{if(path==='/backup/verify')throw new TypeError('Failed to fetch');};
-  const broken=wired(w,{paired:false,hook:offline,patch:cut("    return 'unavailable';\n  }catch{return 'unavailable';}","    return 'trusted';\n  }catch{return 'trusted';}")});
+  const ambiguous=async path=>path==='/backup/verify'?Response.json({valid:'true'},{status:500}):undefined;
+  const safe=wired(w,{hook:ambiguous});assert.equal((await safe.app.readLearningCopy(text)).status,'unavailable');
+  const broken=wired(w,{hook:ambiguous,patch:cut("if(r.status===200&&exactKeys(d,['valid'])&&d.valid===true)return 'trusted';","if(d&&d.valid)return 'trusted';")});
   const r=await broken.app.readLearningCopy(text);assert.equal(r.status,'trusted');assert.equal(L.state(r.kids[0].learning.skills.add1),'SITTER');
-  src.dom.window.close();broken.dom.window.close();
+  src.dom.window.close();safe.dom.window.close();broken.dom.window.close();
+});
+test('TR1 NC: without the paired-Worker binding any server address could confirm a forged file',async()=>{
+  const w=await setup(),now=Date.now();
+  // A hand-written file with retained mastery that nobody signed; the ⚙️ server address points at a server that always says yes.
+  const file={schema:'spark-signed-backup-v1',payload:craftedPayload({ev:[ev(T0,{k:'task',delayed:false}),ev(T0+2*DAY),ev(T0+10*DAY)],box:3,due:T0+20*DAY,independentAt:T0,firstColdAt:T0+2*DAY,retainedAt:T0+10*DAY}),signature:{protocol:'SPARK-EXPORT-V1',digestAlg:'SHA-256',sigAlg:'HMAC-SHA-256',kid:'k1',signedAt:now,digest:'',mac:'A'.repeat(43)}};
+  file.signature.digest=await digestOf(file.payload);const text=JSON.stringify(file);
+  const yes=async()=>Response.json({valid:true});
+  const safe=wired(w,{hook:yes});safe.app.set("serverUrl='https://evil.example'");
+  assert.equal((await safe.app.readLearningCopy(text,now)).status,'unpaired');assert.equal(safe.sent.length,0);
+  const broken=wired(w,{hook:yes,patch:cut("if(!paired()||!validServer(tokenServer))return 'unpaired';","")});broken.app.set("serverUrl='https://evil.example'");
+  const r=await broken.app.readLearningCopy(text,now);assert.equal(r.status,'trusted');assert.equal(L.state(r.kids[0].learning.skills.add1),'SITTER');assert.equal(broken.sent[0].origin,'https://evil.example');
+  safe.dom.window.close();broken.dom.window.close();
 });
 test('TR1 NC: ignoring the verification result would restore mastery from a forged signature',async()=>{
   const w=await setup(),src=wired(w);seedMastery(src);const file=JSON.parse(await src.app.signedLearningExport());
   const forged=JSON.stringify({...file,signature:{...file.signature,mac:flip(file.signature.mac)}});
-  const broken=wired(w,{paired:false,patch:cut("status==='trusted'?{signedAt:data.signature.signedAt}:null","{signedAt:data.signature.signedAt}")});
+  const broken=wired(w,{patch:cut("status==='trusted'?{signedAt:data.signature.signedAt}:null","{signedAt:data.signature.signedAt}")});
   const r=await broken.app.readLearningCopy(forged);assert.equal(r.status,'invalid');assert.equal(L.state(r.kids[0].learning.skills.add1),'SITTER');
   src.dom.window.close();broken.dom.window.close();
 });
 test('TR1 NC: skipping normalization or the trust invariants would admit impossible signed state',async()=>{
   const w=await setup(),now=Date.now();
-  const raw=wired(w,{paired:false,patch:cut('L.trust(L.normalizeMemory(k.learning),trusted.signedAt,now)','L.trust(k.learning,trusted.signedAt,now)')});
+  const raw=wired(w,{patch:cut('L.trust(L.normalizeMemory(k.learning),trusted.signedAt,now)','L.trust(k.learning,trusted.signedAt,now)')});
   let r=await raw.app.readLearningCopy(await container(w,craftedPayload({ev:[ev(T0,{k:'task',delayed:false})],box:99,due:T0,lastAt:T0,independentAt:null,firstColdAt:null,retainedAt:null,admin:true})),now);
   assert.equal(r.kids[0].learning.skills.add1.box,99);assert.equal(r.kids[0].learning.skills.add1.admin,true);
-  const loose=wired(w,{paired:false,patch:cut('if(!times.every(ok)||!dueOk(r.due)||!consistent)quarantineSkill(r,now);','')});
+  const loose=wired(w,{patch:cut('if(!times.every(ok)||!dueOk(r.due)||!consistent)quarantineSkill(r,now);','')});
   r=await loose.app.readLearningCopy(await container(w,craftedPayload({ev:[ev(now+5*DAY,{k:'task',delayed:false}),ev(now+7*DAY),ev(now+15*DAY)],box:3,due:now+20*DAY,independentAt:now+5*DAY,firstColdAt:now+7*DAY,retainedAt:now+15*DAY})),now);
   assert.equal(L.state(r.kids[0].learning.skills.add1),'SITTER');
   raw.dom.window.close();loose.dom.window.close();

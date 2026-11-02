@@ -278,13 +278,15 @@ async function signedLearningExport(){
   if(!r.ok||!validSignature(d)||d.digest!==digest)throw Error(d?.error||'Spark kunne ikke bekrefte kopien.');
   return JSON.stringify({schema:SIGNED_BACKUP,payload,signature:d});
 }
+// The trust root is the Worker this phone is paired with (pairing proved that family's code to it). A server address
+// alone (⚙️, or the default on a new phone) never confirms: it could be any server answering {valid:true}.
 // 'trusted' only on an explicit {valid:true}. Any other reply, network failure or timeout is not a confirmation.
 async function verifyBackup(signature,digest){
+  if(!paired()||!validServer(tokenServer))return 'unpaired';
   try{
-    if(!validServer(serverUrl))return 'unavailable';
     const {r,d}=await backupRequest('/backup/verify',{v:1,...signature,digest},false);
     if(r.status===200&&exactKeys(d,['valid'])&&d.valid===true)return 'trusted';
-    if(r.status===200&&exactKeys(d,['valid','reason'])&&d.valid===false&&d.reason==='signature')return 'invalid';
+    if(r.status===200&&exactKeys(d,['valid','reason'])&&d.valid===false)return d.reason==='signature'?'invalid':d.reason==='key'?'retired':'unavailable';
     return 'unavailable';
   }catch{return 'unavailable';}
 }
@@ -305,7 +307,9 @@ const RESTORE_TEXT={
   trusted:n=>'Denne sikkerhetskopien er bekreftet av Spark.\nLegge til '+n+' profiler? Ferdighetene beholdes. Eksisterende barn beholdes.',
   unsigned:n=>'Denne kopien er ikke bekreftet av Spark.\nLegge til '+n+' profiler som historikk? Ferdighetene bekreftes på nytt på denne enheten. Eksisterende barn beholdes.',
   invalid:n=>'Advarsel: Kopien er endret etter at den ble laget, eller bekreftelsen er ugyldig.\nDen kan bare legges til som historikk, og ferdighetene må bekreftes på nytt. Legge til '+n+' profiler som historikk?',
-  unavailable:n=>'Spark kunne ikke bekrefte kopien nå (ingen kontakt med Spark-serveren).\nAvbryt for å prøve igjen senere, eller legg til '+n+' profiler som historikk nå. Ferdighetene må da bekreftes på nytt. Legge til som historikk nå?'
+  unavailable:n=>'Spark kunne ikke bekrefte kopien nå (ingen kontakt med Spark-serveren).\nAvbryt for å prøve igjen senere, eller legg til '+n+' profiler som historikk nå. Ferdighetene må da bekreftes på nytt. Legge til som historikk nå?',
+  unpaired:n=>'Kopien kan bare bekreftes når denne telefonen er koblet til familiens Spark-server.\nAvbryt, koble telefonen i ⚙️ og gjenopprett på nytt for å beholde ferdighetene, eller legg til '+n+' profiler som historikk nå. Legge til som historikk nå?',
+  retired:n=>'Spark-serveren kan ikke lenger bekrefte denne kopien (signeringsnøkkelen er byttet ut).\nDen kan legges til som historikk, og ferdighetene må bekreftes på nytt. Legge til '+n+' profiler som historikk?'
 };
 function downloadText(text,name){const url=URL.createObjectURL(new Blob([text],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
 function validateImport(data,now=Date.now(),trusted=null){
@@ -316,6 +320,8 @@ function validateImport(data,now=Date.now(),trusted=null){
     for(const [id,r] of Object.entries(k.learning.skills)){
       if(!Object.hasOwn(L.CATALOG,id)||!Array.isArray(r.ev))throw Error('Ukjent ferdighet.');
       for(const e of r.ev)if(!L.event(clean.learning,id,e))throw Error('Ugyldig læringshendelse.');
+      // A signed copy keeps observations too (normalization can move a verified one into evidence), so they get the same check.
+      if(trusted)for(const e of Array.isArray(r.observations)?r.observations:[])if(!L.event(clean.learning,id,e))throw Error('Ugyldig læringshendelse.');
     }
     // Imported history is kept for display but carries no verification authority until revalidated here.
     // Only a copy whose signature the Worker confirmed keeps authority, after the same validation and normalization.
