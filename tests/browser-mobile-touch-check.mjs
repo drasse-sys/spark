@@ -100,6 +100,7 @@ try{
   await tap(page,'#modeTabs [data-t="matte"]','mode tab Matte');assert.equal(await page.evaluate(()=>taskMode),'matte');
   await tap(page,'#inTabs [data-m="camera"]','photo tab');await page.locator('#drop').waitFor();
   await tap(page,'#inTabs [data-m="text"]','text tab');await page.locator('#hwT').waitFor();
+  assert.equal(await page.getByRole('textbox',{name:'✏️ Skriv oppgaven:'}).count(),1,'homework text box is named by its visible label');
   // Practice buttons, zero provider calls.
   await tap(page,'.practice > summary','practice summary');
   await tap(page,'#wordsStart','practice words');assert.match(await page.locator('main').textContent(),/Ingen oppgaver å hente fram/);

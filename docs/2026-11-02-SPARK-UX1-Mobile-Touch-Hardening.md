@@ -69,6 +69,14 @@ Negative controls (new test against modified product code):
 4. doneBar shifted 24 px over the quick bar: fails «pause (busy): covered … by #doneBtn».
 5. `.quick{pointer-events:none}`: fails «4. Vis et eksempel (disabled): covered … by #app».
 
+## Bounded accessibility review (same controls, 360 px, accessibility tree)
+
+* All audited controls have an accessible name and are at least 24 px (WCAG 2.5.8); keyboard focus is visible.
+* Repaired: the homework text box was named by its placeholder, not its visible label «✏️ Skriv oppgaven:»
+  (`<label for="hwT">`). The test asserts the name; it fails on the previous commit.
+* Not changed (outside the bounded list): child selector, mode tabs, photo/text tabs and the voice toggle show their
+  selected/on state only visually (no `aria-pressed`).
+
 ## Residual limits
 
 * Real Android TTS, virtual keyboard, OS font scaling and Vivaldi chrome cannot be reproduced in headless Chromium.
