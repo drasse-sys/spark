@@ -65,3 +65,6 @@ jobs:
 
       - name: Browser learning check
         run: node tests/browser-learning-check.mjs
+
+      - name: Browser mobile touch check
+        run: node tests/browser-mobile-touch-check.mjs

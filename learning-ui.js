@@ -155,10 +155,11 @@ function helpStep(n){
 }
 function learningQuick(){
   if(readOnly){quick.innerHTML='';return;}
-  const s=ensureLearning(),t=s.task;
+  const s=ensureLearning(),t=s.task,blocked=busy||pendingFinal?'disabled':'';
+  // Every control that its handler would ignore is rendered disabled, so it never looks tappable.
   quick.innerHTML=`<span class="ladder-label">${['Du prøver selv','Liten påminnelse','Et hint','Mindre steg','Et eksempel'][t.s]} · velg hjelp når du vil</span>`+
-    [[1,'Lite puff'],[2,'Lite hint'],[3,'Mindre steg'],[4,'Vis et eksempel']].map(([n,label])=>`<button class="qb" data-help="${n}" ${busy||pendingFinal?'disabled':''}>${n}. ${label}</button>`).join('')+
-    `<button class="qb" id="stuckBtn">Jeg vet ikke</button><button class="qb" id="pauseLearning">Pause / for vanskelig</button>`;
+    [[1,'Lite puff'],[2,'Lite hint'],[3,'Mindre steg'],[4,'Vis et eksempel']].map(([n,label])=>`<button class="qb" data-help="${n}" ${blocked}>${n}. ${label}</button>`).join('')+
+    `<button class="qb" id="stuckBtn" ${blocked}>Jeg vet ikke</button><button class="qb" id="pauseLearning" ${busy?'disabled':''}>Pause / for vanskelig</button>`;
   quick.querySelectorAll('[data-help]').forEach(b=>{b.disabled ||= +b.dataset.help>2&&t.s<+b.dataset.help-1&&!t.attempts;b.onclick=()=>helpStep(+b.dataset.help);});
   $('stuckBtn').onclick=()=>{s.softHelp=true;helpStep(2);};
   $('pauseLearning').onclick=()=>{if(busy)return;stopSpeak();stopMic();s.lastInteraction=null;saveSession();view='start';startNotice='Vi tar pause. Oppgaven er lagret, og du kan fortsette eller avslutte senere.';render();};
@@ -180,6 +181,7 @@ function renderLearningPanel(box){
   if($('skipTransfer'))$('skipTransfer').onclick=()=>{s.transferOffer=null;saveSession();render();};
   if($('skipCheck'))$('skipCheck').onclick=()=>{if(busy)return;if(s.practice)advancePractice();else{nextLearningTask();learningReply('Vi fortsetter når du vil.');}};
   if($('nextLearningTask'))$('nextLearningTask').onclick=()=>{if(busy)return;nextLearningTask();learningReply('Skriv den neste deloppgaven når du er klar.');};
+  for(const id of ['checkHomework','trySelf','skipCheck','nextLearningTask'])if($(id))$(id).disabled=busy||id==='checkHomework'&&!!pendingFinal;
   if($('confidence')){$('confidence').value=s.confidence||'';$('confidence').onchange=e=>{s.confidence=e.target.value;saveSession();};}
   $('reflection').value=s.reflection||'';$('reflection').onchange=e=>{s.reflection=e.target.value;saveSession();};
   if(taskMode==='lesing')renderReading(box);
@@ -274,5 +276,6 @@ function renderReading(box){
   if($('readPassage'))$('readPassage').onclick=readPassage;if($('stopPassage'))$('stopPassage').onclick=()=>{readingRun++;readingSentence=-1;stopSpeak();render();};
   node.querySelectorAll('[data-reading]').forEach(b=>b.onclick=()=>{if(busy)return;$('msg').value=b.dataset.reading;send();});
   if($('predictReading'))$('predictReading').onclick=()=>{if(busy)return;s.predictionUsed=true;$('msg').value='La meg gjette hva som skjer videre før vi leser slutten. Spør etter ett spor etterpå.';send();};
+  node.querySelectorAll('[data-reading],#predictReading').forEach(b=>b.disabled=busy||!!pendingFinal);
   node.querySelectorAll('[data-word]').forEach(b=>b.onclick=()=>{saveWord(pendingWords[+b.dataset.word]);saveKids();b.disabled=true;b.textContent='Lagret til senere';});
 }
