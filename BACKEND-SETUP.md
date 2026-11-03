@@ -128,6 +128,19 @@ eller:
 npx wrangler secret put GROQ_API_KEY
 ```
 
+## 6b. Valgfritt: bekreftede sikkerhetskopier (TR1)
+
+Uten denne hemmeligheten fungerer alt som før: læringskopier lastes ned ubekreftet og gjenopprettes som historikk, og ferdighetene bekreftes på nytt på den nye telefonen.
+
+Med hemmeligheten blir kopien fra en paret telefon bekreftet av Spark-serveren. Den kan da gjenopprettes med ferdighetsnivåene i behold på en ny telefon. Bekreftelsen gjøres alltid av serveren som er bygd inn i appen (`DEFAULT_SERVER_URL`), aldri av en adresse fra innstillingene. Bruker familien sin egen kopi av appen, må den adressen peke på familiens egen Worker. Serveren får bare et sjekksum-fingeravtrykk av kopien, aldri selve innholdet.
+
+```powershell
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+npx wrangler secret put EXPORT_SIGNING_SECRET
+```
+
+Bruk en ny, lang verdi (minst 32 tegn) som ikke er lik noen annen Spark-hemmelighet. Ta vare på den. Bytter du den uten å beholde den gamle som `EXPORT_PREVIOUS_SECRET` (med `EXPORT_PREVIOUS_KID`), kan eldre kopier bare gjenopprettes som historikk, og de vises som «endret». Ved bytte: legg den gamle verdien i `EXPORT_PREVIOUS_SECRET` med `EXPORT_PREVIOUS_KID=k1`, og sett den nye med `EXPORT_SIGNING_KID=k2`. En bekreftet kopi er som en nøkkel til barnets læringshistorikk. Alle som har filen kan gjenopprette den, så oppbevar den like trygt som andre private filer. Detaljer: `docs/2026-11-02-SPARK-TR1-Trusted-Backup-Restore.md`.
+
 ## 7. Hvis en telefon blir borte
 
 Den eksisterende `REVOKE_BEFORE`-innstillingen kan tilbakekalle alle token utstedt før et valgt tidspunkt (epoch-millisekunder). Eldre token uten `iat` blir også avvist når grensen er satt. Token som utstedes etter grensen fortsetter å fungere. Dette krever en bevisst serverendring av forelderen; vanlig oppdatering av Spark krever ingen endring av hemmeligheter.

@@ -79,6 +79,37 @@ function sameCode(a,b){
   a=String(a||''); b=String(b||''); if(a.length!==b.length) return false;
   let d=0; for(let i=0;i<a.length;i++) d|=a.charCodeAt(i)^b.charCodeAt(i); return d===0;
 }
+// TR1 trusted backup. The Worker never receives a backup: the phone sends only a SHA-256 digest of the exact export bytes.
+// A MAC proves that a paired Spark device asked for this digest to be signed at `signedAt`, under key `kid`.
+const EXPORT_PROTOCOL='SPARK-EXPORT-V1', EXPORT_DIGEST_ALG='SHA-256', EXPORT_SIG_ALG='HMAC-SHA-256';
+// Canonical unpadded base64url of 32 bytes: the last character carries 2 zero bits, so each value has one spelling.
+const EXPORT_B64_32=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/, EXPORT_KID=/^k[1-9][0-9]{0,2}$/;
+const exactKeys=(o,keys)=>!!o&&typeof o==='object'&&!Array.isArray(o)&&Object.keys(o).sort().join()===keys.slice().sort().join();
+// Current key plus at most one previous key, each with an explicit id. A key shorter than 32 characters,
+// or one reused from another Spark secret, counts as absent: signing then fails closed and the phone offers a
+// history-only copy. Verification tries every configured key with the presented id, so a previous key that kept the
+// current id (a rotation without a new kid) still verifies its old backups.
+function exportKeys(env){
+  const keys=[], reused=[env.DEVICE_SIGNING_SECRET,env.FAMILY_CODE,env.GEMINI_API_KEY,env.OPENROUTER_API_KEY,env.GROQ_API_KEY].filter(Boolean);
+  for(const [kid,secret,current] of [[env.EXPORT_SIGNING_KID||'k1',env.EXPORT_SIGNING_SECRET,true],[env.EXPORT_PREVIOUS_KID,env.EXPORT_PREVIOUS_SECRET,false]]){
+    if(typeof kid==='string'&&EXPORT_KID.test(kid)&&typeof secret==='string'&&secret.length>=32&&!reused.includes(secret))keys.push({kid,secret,current});
+  }
+  return keys;
+}
+// Fixed fields, each restricted to a newline-free syntax, joined by newlines: one byte string per (kid, time, digest).
+function exportMessage(kid,signedAt,digest){
+  return enc.encode([EXPORT_PROTOCOL,EXPORT_DIGEST_ALG,EXPORT_SIG_ALG,kid,String(signedAt),digest].join('\n'));
+}
+async function exportKey(secret,usage){
+  return crypto.subtle.importKey('raw',enc.encode(secret),{name:'HMAC',hash:'SHA-256'},false,[usage]);
+}
+async function signExport(secret,kid,signedAt,digest){
+  return b64url(await crypto.subtle.sign('HMAC',await exportKey(secret,'sign'),exportMessage(kid,signedAt,digest)));
+}
+// Web Crypto's HMAC verify compares in constant time.
+async function verifyExport(secret,kid,signedAt,digest,mac){
+  return crypto.subtle.verify('HMAC',await exportKey(secret,'verify'),unb64url(mac),exportMessage(kid,signedAt,digest));
+}
 function errorInfo(e){
   const text=((e&&e.message)||'')+' '+((e&&e.details)||'');
   const daily=DAILY.test(text);
@@ -86,7 +117,7 @@ function errorInfo(e){
 }
 function redactSecrets(value,env){
   let text=String(value||'');
-  for(const name of ['GEMINI_API_KEY','FAMILY_CODE','DEVICE_SIGNING_SECRET','OPENROUTER_API_KEY','GROQ_API_KEY']){
+  for(const name of ['GEMINI_API_KEY','FAMILY_CODE','DEVICE_SIGNING_SECRET','OPENROUTER_API_KEY','GROQ_API_KEY','EXPORT_SIGNING_SECRET','EXPORT_PREVIOUS_SECRET']){
     if(env[name]) text=text.replaceAll(String(env[name]),'[redacted]');
   }
   return text;
@@ -717,6 +748,42 @@ export default {
         logProviderFailure('provider_error',e,env);
         return json({error:redactSecrets(clientError('provider_error',e),env),kind:'provider_error',reason:diagnose(e).reason},providerStatus(e),c.headers);
       }
+    }
+
+    // Signing needs a paired device. Neither endpoint reads, logs or returns anything but digest and signature fields.
+    if(url.pathname==='/backup/sign' && request.method==='POST'){
+      const device=await verifyToken(env,(request.headers.get('authorization')||'').replace(/^Bearer\s+/i,''));
+      if(!device) return json({error:'Enheten må kobles til på nytt.'},401,c.headers);
+      if(env.CHAT_LIMITER){ const {success}=await env.CHAT_LIMITER.limit({key:'backup-sign:'+device.deviceId}); if(!success) return json({error:'For mange forespørsler på kort tid. Vent litt og prøv igjen.'},429,c.headers); }
+      const current=exportKeys(env).find(k=>k.current);
+      if(!current) return json({error:'Bekreftede sikkerhetskopier er ikke satt opp på serveren.'},503,c.headers);
+      const parsed=await readBody(request,512);
+      if(parsed.error) return json({error:parsed.error},parsed.status,c.headers);
+      const body=parsed.body;
+      if(!exactKeys(body,['v','digest'])||body.v!==1||typeof body.digest!=='string'||!EXPORT_B64_32.test(body.digest)) return json({error:'Ugyldig forespørsel.'},400,c.headers);
+      const signedAt=Date.now();
+      return json({protocol:EXPORT_PROTOCOL,digestAlg:EXPORT_DIGEST_ALG,sigAlg:EXPORT_SIG_ALG,kid:current.kid,signedAt,digest:body.digest,mac:await signExport(current.secret,current.kid,signedAt,body.digest)},200,c.headers);
+    }
+    // Verification reveals one bit and no key material, so a phone can restore before it is paired. Rate-limited per IP and globally.
+    if(url.pathname==='/backup/verify' && request.method==='POST'){
+      if(env.PAIR_GLOBAL_LIMITER){ const {success}=await env.PAIR_GLOBAL_LIMITER.limit({key:'backup-verify'}); if(!success) return json({error:'For mange forespørsler på kort tid. Vent litt og prøv igjen.'},429,c.headers); }
+      if(env.PAIR_LIMITER){ const {success}=await env.PAIR_LIMITER.limit({key:'backup-verify:'+(request.headers.get('cf-connecting-ip')||'unknown')}); if(!success) return json({error:'For mange forespørsler på kort tid. Vent litt og prøv igjen.'},429,c.headers); }
+      const keys=exportKeys(env);
+      if(!keys.length) return json({error:'Bekreftede sikkerhetskopier er ikke satt opp på serveren.'},503,c.headers);
+      const parsed=await readBody(request,1024);
+      if(parsed.error) return json({error:parsed.error},parsed.status,c.headers);
+      const b=parsed.body;
+      if(!exactKeys(b,['v','protocol','digestAlg','sigAlg','kid','signedAt','digest','mac'])||b.v!==1||
+        !['protocol','digestAlg','sigAlg','kid'].every(k=>typeof b[k]==='string'&&b[k].length<=40)||
+        !Number.isSafeInteger(b.signedAt)||b.signedAt<=0||typeof b.digest!=='string'||!EXPORT_B64_32.test(b.digest)||typeof b.mac!=='string'||!EXPORT_B64_32.test(b.mac))
+        return json({error:'Ugyldig forespørsel.'},400,c.headers);
+      if(b.protocol!==EXPORT_PROTOCOL||b.digestAlg!==EXPORT_DIGEST_ALG||b.sigAlg!==EXPORT_SIG_ALG) return json({valid:false,reason:'signature'},200,c.headers);
+      // An unknown or retired key id is not evidence of tampering: the phone treats it as "cannot confirm".
+      const candidates=keys.filter(k=>k.kid===b.kid);
+      if(!candidates.length) return json({valid:false,reason:'key'},200,c.headers);
+      let valid=false;
+      for(const k of candidates){ try{ valid ||= await verifyExport(k.secret,b.kid,b.signedAt,b.digest,b.mac); }catch{} }
+      return json(valid?{valid:true}:{valid:false,reason:'signature'},200,c.headers);
     }
 
     return json({error:'Ikke funnet.'},404,c.headers);
