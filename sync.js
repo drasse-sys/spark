@@ -213,7 +213,8 @@
   // d = {subtle, random(n), now(), request(path, body) -> {status, data} (throws when offline), loadState(), saveState(obj),
   //      kids() -> array, saveKids() -> bool, addKid(kid), removeKid(kid), newKid(profile)}
   function createEngine(d){
-    let keyCache=null,running=null;
+    // `complete`: the generation whose download the last round finished to the head (not stopped by the page budget).
+    let keyCache=null,running=null,complete='';
     const newId=()=>b64url(d.random(16));
     function state(){
       let s;try{s=JSON.parse(d.loadState()||'null');}catch{s=null;}
@@ -303,11 +304,13 @@
       // Reset is always possible (it is the way out of a lost key, a full family or a corrupt stored key). Only a phone that
       // has just completed a download in the current generation (so every deletion it can receive is applied) shares its
       // children again automatically. Otherwise they stay here as local copies, shared again only by an explicit choice.
-      let fresh=false;if(state().enabled){const r=await sync();fresh=r.ok||r.code==='quota';}
+      // "Just downloaded completely" means: the round reached the Worker's head (not stopped by the page budget), and the
+      // Worker confirms that this reset replaced exactly that generation (no concurrent reset in between).
+      let fresh='';if(state().enabled){const r=await sync();if((r.ok||r.code==='quota')&&complete===state().gen)fresh=complete;}
       const raw=d.random(16),text=await keyText(d.subtle,raw),k=await deriveKeys(d.subtle,raw);
       let r;try{r=await d.request('/sync/admin',{v:1,op:'reset',code:String(code||''),proof:k.proof});}catch{return {ok:false,code:'offline'};}
       if(r.status!==200||!ID.test(r.data?.gen))return {ok:false,code:r.data?.code||'error',error:r.data?.error||''};
-      const before=fresh?shared():[],result=await activate(text,k,r.data);
+      const before=fresh&&r.data.prev===fresh?shared():[],result=await activate(text,k,r.data);
       // Children still here (not removed by a verified tombstone) are shared again under new ids.
       if(result.ok&&before.length){for(const kid of before)if(d.kids().includes(kid))share(kid);d.saveKids();}
       return result;
@@ -372,6 +375,7 @@
       return quota?fail('quota'):null;
     }
     async function pull(s,k){
+      complete='';
       for(let page=0;page<LIMITS.pullPages;page++){
         const r=await d.request('/sync/pull',{v:1,gen:s.gen,cursor:s.cursor});
         const data=r.data;
@@ -405,7 +409,7 @@
         if(!data.more){
           const horizon=data.serverNow-WINDOW-SKEW;
           for(const kid of shared()){try{checkpoint(kid.sync,horizon);}catch{detach(kid);}}
-          d.saveKids();return null;
+          d.saveKids();complete=s.gen;return null;
         }
       }
       return null;
@@ -415,7 +419,7 @@
     async function sync(){
       if(running)return running;
       running=(async()=>{
-        const s=state();if(!s.enabled)return {ok:false,code:'off'};
+        const s=state();complete='';if(!s.enabled)return {ok:false,code:'off'};
         let k;try{k=await keys(s);}catch{return fail('key');}
         try{
           // A full family still downloads (so deletions arrive); the quota status is reported after the download.

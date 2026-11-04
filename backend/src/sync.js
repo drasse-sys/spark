@@ -190,7 +190,11 @@ async function syncHandle(request,env,url,c,h){
       // starts with the caller. Kept: revocations (a revoked id stays revoked), deleted child ids (never accepted again)
       // and tombstones (handed to re-joining phones). Phones keep their local data.
       const gen=syncId(),verifier=await syncDigest(b.proof);
-      await db.batch([
+      // `prev` (read inside the same transaction) is the generation this reset replaced. A phone re-shares automatically
+      // only when it equals the generation it has just downloaded completely: a concurrent reset (and deletions in its
+      // generation) between that download and this request make the phone's copies local copies instead.
+      const [before]=await db.batch([
+        db.prepare('SELECT gen FROM sync_families WHERE family_id=?1').bind(fam),
         db.prepare('DELETE FROM sync_records WHERE family_id=?1').bind(fam),
         db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='active'").bind(fam),
         db.prepare("DELETE FROM sync_devices WHERE family_id=?1 AND status='active'").bind(fam),
@@ -198,7 +202,7 @@ async function syncHandle(request,env,url,c,h){
         // The caller proved the family code (the parent), so its own device is (re)activated.
         db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day) VALUES (?1, ?2, 'active', ?3, ?4) ON CONFLICT(family_id, device_id) DO UPDATE SET status='active', enrolled_at=excluded.enrolled_at, seen_day=excluded.seen_day").bind(fam,device.deviceId,now,syncDay(now))
       ]);
-      return reply({v:1,gen,serverNow:now,tombstones:await syncTombstones(db,fam)});
+      return reply({v:1,gen,prev:before.results[0]?.gen||'',serverNow:now,tombstones:await syncTombstones(db,fam)});
     }
     const m=await syncMember(db,fam,device.deviceId,b.gen);if(!m.row)return error(m.status,m.code,SYNC_CODE_TEXT[m.code]);
     if(op==='revoke'){

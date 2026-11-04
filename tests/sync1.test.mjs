@@ -684,3 +684,48 @@ test('re-review MEDIUM: one far-future review does not pin a word in the future'
   const r=L.reviewWord(m,{wordId:'w',t:3*DAY,s:0,ok:true,c:''});assert.equal(r.delayed,false);assert.equal(m.items[0].lastAt,3*DAY,'re-anchored');
   assert.equal(L.reviewWord(m,{wordId:'w',t:5*DAY,s:0,ok:true,c:''}).delayed,true,'normal credit resumes');
 });
+
+/* Third independent review (reset / deletion / re-share boundary). Each test reproduces the finding before its repair. */
+// Children the family holds as active in dev's generation, decrypted with dev's key.
+async function familyChildren(dev){
+  const st=dev.engine.state(),k=await S.deriveKeys(webcrypto.subtle,await S.parseKey(webcrypto.subtle,st.key));
+  const rows=(await db.prepare("SELECT r.record_id AS id, r.child_id AS child, r.kind, r.iv, r.ct FROM sync_records r JOIN sync_families f ON f.family_id=r.family_id AND f.gen=?1 JOIN sync_children c ON c.family_id=r.family_id AND c.child_id=r.child_id AND c.status='active' WHERE r.kind='base'").bind(st.gen).all()).results;
+  const out=[];for(const r of rows){const p=await S.open(webcrypto.subtle,k.encKey,st.gen,r);out.push(p?p.profile.name:'?');}return out.sort();
+}
+test('review-3 F1: a concurrent reset (and a deletion in its generation) between a phone\'s download and its reset request never re-shares the deleted child',async()=>{
+  const {fam,A,B}=await pair('r3f1');
+  let hooked=false;
+  B.intercept=async(path,body,go)=>{
+    if(path==='/sync/admin'&&body.op==='reset'&&!hooked){hooked=true;
+      // After B's pre-reset download: A resets (G2), re-shares Ada, and deletes her in G2.
+      assert.ok((await A.engine.reset({code:fam.code})).ok);await A.sync();
+      assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:A.kid('Ada')}),{ok:true});assert.deepEqual(await familyChildren(A),[]);
+    }
+    return go();
+  };
+  const r=await B.engine.reset({code:fam.code});B.intercept=null;assert.ok(r.ok);await B.sync();
+  assert.deepEqual(await familyChildren(B),[],'the child deleted in G2 is not shared again in G3');
+  const local=B.kid('Ada');assert.ok(local&&!local.sync&&local.fork,'kept on B as a local copy only');assert.equal(B.engine.shareAll(),0);
+  assert.ok((await A.engine.join({key:r.key})).ok);await A.sync();assert.equal(A.kid('Ada'),undefined,'not back on the phone that deleted her');
+  // Without a concurrent reset the resetting phone still re-shares (liveness of the HIGH-1 repair).
+  const p=await pair('r3f1b');const r2=await p.A.engine.reset({code:p.fam.code});assert.ok(r2.ok);await p.A.sync();assert.deepEqual(await familyChildren(p.A),['Ada']);
+});
+test('review-3 F2: a download stopped by the page budget is not "complete": the resetting phone keeps its children as local copies',async()=>{
+  const clock=world(),fam=family(db,clock,'r3f2'+(n++));
+  const A=await device(fam,clock),B=await device(fam,clock,{realm:clientRealm(cut('pullPages:40','pullPages:1'))});
+  const ada=A.kids[0];ada.name='Ada';A.practice(ada,'add1');
+  const c=await A.engine.create({code:fam.code});const x=blankKid('Xena');A.kids.push(x);A.practice(x,'add1');assert.equal(A.engine.shareAll(),2);A.saveKids();
+  assert.deepEqual(await A.sync(),{ok:true});assert.ok((await B.engine.join({key:c.key})).ok);await B.sync();assert.ok(B.kid('Xena')?.sync);
+  B.online=false;
+  // More than one page (200 rows) of new family records, then Xena's deletion, then 100 newer deletions (so her
+  // tombstone is no longer among the newest 100 the reset reply carries).
+  for(let i=0;i<230;i++){clock.advance(1000);A.practice(A.kid('Ada'),'add1');}
+  assert.deepEqual(await A.sync(),{ok:true});assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:A.kid('Xena')}),{ok:true});
+  const famId=(await db.prepare('SELECT family_id AS f FROM sync_families WHERE gen=?1').bind(A.engine.state().gen).first()).f;
+  for(let i=0;i<100;i++)await db.prepare("INSERT INTO sync_tombstones (family_id, child_id, gen, record_id, iv, ct, deleted_at) VALUES (?1, ?2, 'x', ?2, 'AAAAAAAAAAAAAAAA', 'AAAAAAAAAAAAAAAAAAAAAA', ?3)").bind(famId,'T'+String(i).padStart(20,'0')+'A',clock.now()+1000+i).run();
+  B.online=true;let pulls=0;B.intercept=async(path,body,go)=>{if(path==='/sync/pull')pulls++;return go();};
+  const r=await B.engine.reset({code:fam.code});B.intercept=null;assert.ok(r.ok);assert.equal(pulls,1,'the pre-reset download stopped at the page budget');
+  await B.sync();
+  assert.ok(!(await familyChildren(B)).includes('Xena'),'the family-deleted child is not shared again');
+  assert.ok(B.kid('Xena')&&!B.kid('Xena').sync&&B.kid('Xena').fork,'kept on B as a local copy only');
+});
