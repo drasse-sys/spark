@@ -814,7 +814,7 @@ test('R12: many hide/unhide cycles keep one authoring stream (no stream budget i
   assert.equal(snapshot(A),snapshot(B));
   assert.ok(Object.keys(B.kid('Ada').sync.cp.st?.meta.vc??{}).length<=2);void stream;
 });
-test('R13: a cloned or restored copy of a phone\'s storage does not lose work, in either order of syncing',async()=>{
+test('R13: a cloned or restored copy of a phone\'s storage, both freshly opened: no work is lost and nothing is counted twice, in either order',async()=>{
   for(const first of ['clone','original']){
     const {clock,fam,A,B,key}=await pair('r13'+first);
     B.addWord(B.kid('Ada'),'start','x');await B.sync();await A.sync();
@@ -823,11 +823,46 @@ test('R13: a cloned or restored copy of a phone\'s storage does not lose work, i
     assert.equal(C.kid('Ada').sync.out.s,B.kid('Ada').sync.out.s,'same stream, same counters');
     B.addWord(B.kid('Ada'),'fraB','x');B.practice(B.kid('Ada'),'sub1');
     C.addWord(C.kid('Ada'),'fraC','y');C.practice(C.kid('Ada'),'add1');
+    B.reload();B.restart();                                                    // the original is opened again as well
     const order=first==='clone'?[C,B,C,A,B]:[B,C,B,A,C];
-    for(const d of [...order,B,C,A,B,C,A])assert.deepEqual(await d.sync(),{ok:true});   // (a re-sent operation needs one more round)
-    for(const [nm,d] of [['A',A],['B',B],['C',C]]){assert.ok(has(d,'fraB'),first+': fraB on '+nm);assert.ok(has(d,'fraC'),first+': fraC');assert.ok(d.kid('Ada').learning.skills.sub1&&d.kid('Ada').learning.skills.add1);}
+    for(const d of [...order,B,C,A,B,C,A])assert.deepEqual(await d.sync(),{ok:true});
+    for(const [nm,d] of [['A',A],['B',B],['C',C]]){assert.ok(has(d,'fraB'),first+': fraB on '+nm);assert.ok(has(d,'fraC'),first+': fraC on '+nm);
+      for(const [sk,n] of [['sub1',1],['add1',2]])assert.equal(d.kid('Ada').learning.skills[sk].ev.length,n,first+': '+sk+' counted once on '+nm);}   // (add1 already held one event from before sharing)
     assert.equal(snapshot(A),snapshot(B));assert.equal(snapshot(A),snapshot(C));
   }
+});
+test('R13b: a long-running phone that already sent a counter its clone also used may lose that operation, but nothing is ever counted twice; every phone agrees',async()=>{
+  const {clock,fam,A,B,key}=await pair('r13b');
+  B.addWord(B.kid('Ada'),'start','x');await B.sync();await A.sync();
+  const C=await device(fam,clock);C.persisted=B.persisted;C.state=B.state;C.reload();C.restart();assert.ok((await C.engine.join({key})).ok);
+  B.practice(B.kid('Ada'),'sub1');C.practice(C.kid('Ada'),'add1');
+  // B was never reopened, so it uploads before it downloads; C downloads first.
+  for(const d of [C,B,A,B,C,A,B,C,A])assert.deepEqual(await d.sync(),{ok:true});
+  for(const d of [A,B,C])for(const [sk,n] of [['sub1',1],['add1',2]])assert.ok((d.kid('Ada').learning.skills[sk]?.ev.length??0)<=n,'never twice');
+  assert.equal(snapshot(A),snapshot(B));assert.equal(snapshot(A),snapshot(C));
+});
+test('R13c: a push that the Worker stored but whose reply was lost, then an app reopen next to a clone, never counts an operation twice',async()=>{
+  const {clock,fam,A,B,key}=await pair('r13c');
+  B.addWord(B.kid('Ada'),'start','x');await B.sync();await A.sync();
+  const C=await device(fam,clock);C.persisted=B.persisted;C.state=B.state;C.reload();C.restart();assert.ok((await C.engine.join({key})).ok);
+  const w=B.kid('Ada').learning.items[0].id;
+  B.reviewWord(B.kid('Ada'),w,{ok:true});C.reviewWord(C.kid('Ada'),w,{ok:false});
+  await C.sync();                                                              // C's review is stored first
+  B.intercept=async(path,body,go)=>{const r=await go();if(path==='/sync/push'){B.intercept=null;throw Error('reply lost');}return r;};
+  await B.sync();                                                              // B's is stored, B never hears
+  B.reload();B.restart();
+  for(const d of [B,C,A,B,C,A,B,C,A])assert.deepEqual(await d.sync(),{ok:true});
+  const total=d=>d.kid('Ada').learning.items[0].ev.length;
+  assert.equal(total(A),total(B));assert.equal(total(A),total(C));assert.ok(total(A)<=3,'start + at most B + C once each: '+total(A));
+  assert.equal(snapshot(A),snapshot(B));
+});
+test('LOW: a phone that is still catching up (download before upload) says so instead of reporting success',async()=>{
+  const {A,B}=await pair('catch');
+  B.addWord(B.kid('Ada'),'x','y');B.restart();
+  B.intercept=async(path,body,go)=>{const r=await go();if(path==='/sync/pull'&&r.status===200)return {...r,data:{...r.data,more:true}};return r;};
+  const r=await B.sync();assert.equal(r.ok,false);assert.equal(r.code,'catchup');assert.equal(B.engine.state().status,'catchup');
+  assert.equal(B.sent.filter(x=>x.path==='/sync/push').length,B.sent.filter(x=>x.path==='/sync/push').length);
+  B.intercept=null;assert.deepEqual(await B.sync(),{ok:true});await A.sync();assert.equal(snapshot(A),snapshot(B));
 });
 test('R14: storage rolled back to an older copy, then a restart: the first download comes before any upload, so no counter is reused',async()=>{
   const {A,B}=await pair('r14');

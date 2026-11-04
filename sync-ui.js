@@ -75,7 +75,7 @@ async function syncRun(){
 const SYNC_STATUS={
   ok:'Synkronisert',offline:'Ingen forbindelse. Endringene ligger trygt på telefonen og sendes senere.',unavailable:'Synkroniseringen er utilgjengelig akkurat nå. Prøver igjen senere.',
   rate:'Mange forespørsler. Prøver igjen om litt.',auth:'Denne telefonen må kobles til Spark på nytt.',revoked:'Denne telefonen er fjernet fra familiens synkronisering. Dataene på telefonen er beholdt.',
-  rejoin:'Synkroniseringen er startet på nytt. Skriv inn den nye nøkkelen.',storage:'Telefonen har ikke plass til å lagre. Frigjør plass.',quota:'Familiens synkroniseringsplass er full.',key:'Synkroniseringsnøkkelen på denne telefonen er ugyldig.',off:'Av'
+  rejoin:'Synkroniseringen er startet på nytt. Skriv inn den nye nøkkelen.',storage:'Telefonen har ikke plass til å lagre. Frigjør plass.',quota:'Familiens synkroniseringsplass er full.',catchup:'Henter først det som er nytt, før noe sendes. Fortsetter snart.',key:'Synkroniseringsnøkkelen på denne telefonen er ugyldig.',off:'Av'
 };
 function syncStatusText(){
   const s=syncEngineGet().state();

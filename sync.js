@@ -229,7 +229,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
     }
     const pending=[];
     for(const op of s.pending){if(!op||!ID.test(op.id)||!['base','op'].includes(op.kind))return null;const p=checkPayload(op.kind,op.p,'');if(!p)return null;pending.push({id:op.id,kind:op.kind,p});}
-    return {v:1,cp:{st},log,pending,seen:s.seen.filter(x=>typeof x==='string'&&x.length===16).slice(-LIMITS.seen),wm:Number.isSafeInteger(s.wm)&&s.wm>0?s.wm:0,...(s.out?{out:{s:s.out.s,n:s.out.n}}:{}),...(profile(s.profile)?{profile:profile(s.profile)}:{}),...(s.blocked===true?{blocked:true}:{})};
+    return {v:1,cp:{st},log,pending,seen:s.seen.filter(x=>typeof x==='string'&&x.length===16).slice(-LIMITS.seen),wm:Number.isSafeInteger(s.wm)&&s.wm>0?s.wm:0,...(s.out?{out:{s:s.out.s,n:s.out.n}}:{}),...(s.clash===true?{clash:true}:{}),...(profile(s.profile)?{profile:profile(s.profile)}:{}),...(s.blocked===true?{blocked:true}:{})};
   }
   // Local profile and learning as the child's synced state. Fields that never sync stay as they were on this phone.
   function materialize(kid){
@@ -460,7 +460,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
         if(adopt())continue;
         const data=r.data;
         if(r.status!==200||!Array.isArray(data?.records)||!Number.isSafeInteger(data.next)||data.next<s.cursor||!time(data.serverNow)||!Array.isArray(data.children))return stop(r);
-        const changed=new Set(),rekey=new Map();
+        const changed=new Set();
         for(const rec of data.records){
           if(!rec||!Number.isSafeInteger(rec.seq)||rec.seq<=s.cursor||rec.seq>data.next||!Number.isSafeInteger(rec.at)||![0,1].includes(rec.ck))return fail('unavailable');
           if(s.deleted.includes(rec.child)||s.hidden.includes(rec.child))continue;
@@ -480,12 +480,10 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           // After a restore of older local storage this phone's own earlier records come back: never reuse their counters.
           if(p.o&&target.sync.out&&p.o.s===target.sync.out.s){
             // Somebody else (a cloned or restored copy of this phone's storage) wrote to this phone's own stream. If an operation
-            // waiting in the queue holds the same counter, it would be taken for a duplicate: it gets a fresh stream below.
-            if(target.sync.pending.some(o=>o.p.o&&o.p.o.s===p.o.s&&o.p.o.n===p.o.n))rekey.set(target,rekey.get(target)||[]);
-            // The same counter was already sent by this phone and is in its log: the fold keeps whichever of the two sorts first and
-            // drops the other, the same way on every phone. If that is ours, the operation is sent again under a fresh stream.
-            const mine=target.sync.log.find(r=>r.p.o&&r.p.o.s===p.o.s&&r.p.o.n===p.o.n&&r.id!==rec.id);
-            if(mine&&order({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p},mine)<0)rekey.set(target,[...(rekey.get(target)||[]),mine]);
+            // waiting in the queue holds the same counter, it would be taken for a duplicate: it moves to a fresh stream, but only
+            // once the download has reached the head (below), when every record this phone itself already sent has arrived and
+            // left the queue. (No operation is ever sent twice to "repair" a collision: that could count it twice.)
+            if(target.sync.pending.some(o=>o.p.o&&o.p.o.s===p.o.s&&o.p.o.n===p.o.n))target.sync.clash=true;
             if(p.o.n>target.sync.out.n)target.sync.out.n=p.o.n;
           }
           target.sync.log.push({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p});markSeen(target.sync,rec.id);changed.add(target);
@@ -498,13 +496,6 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           // A child this phone already deleted from the family (or removed here with nothing unsent) whose removal was not
           // persisted (sync state saved, then spark_kids failed to save) is removed now; its records are skipped above.
           for(const kid of shared())if(s.deleted.includes(kid.id)||s.hidden.includes(kid.id)&&!kid.sync.pending.length)d.removeKid(kid);
-        }
-        // Unsent operations whose counters were taken by another writer of the same stream move to a new stream of this phone.
-        for(const [kid,lostOps] of rekey)if(kid.sync&&kid.sync.out){
-          const old=kid.sync.out.s,fresh={s:b64url(d.random(9)),n:0};
-          for(const op of kid.sync.pending)if(op.p.o&&op.p.o.s===old){fresh.n++;op.p={...op.p,o:{s:fresh.s,n:fresh.n}};}
-          for(const l of lostOps){fresh.n++;kid.sync.pending.push({id:newId(),kind:'op',p:{...l.p,o:{s:fresh.s,n:fresh.n}}});}
-          kid.sync.out=fresh;
         }
         for(const kid of changed)if(kid.sync)mat(kid);
         // Everything of every shared child up to `next` is now incorporated (applied here, applied before, or refused on
@@ -520,6 +511,11 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
         s.cursor=data.next;s.serverTime=data.serverNow;
         if(!save(s))return fail('storage');
         if(!data.more){
+          // Operations still queued after a complete download were never stored, so they can safely change stream.
+          for(const kid of shared())if(kid.sync.clash){
+            delete kid.sync.clash;
+            if(kid.sync.out){const old=kid.sync.out.s,fresh={s:b64url(d.random(9)),n:0};for(const op of kid.sync.pending)if(op.p.o&&op.p.o.s===old){fresh.n++;op.p={...op.p,o:{s:fresh.s,n:fresh.n}};}kid.sync.out=fresh;}
+          }
           const horizon=data.serverNow-WINDOW-SKEW;
           for(const kid of shared()){try{checkpoint(kid.sync,horizon);}catch{detach(kid);}}
           d.saveKids();complete=s.gen;return null;
@@ -540,7 +536,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           // own earlier records (after a restore of older storage) and anyone else's use of its stream are then seen before it
           // sends anything, so no queued operation goes out with a counter that is already taken.
           const round=async()=>{
-            if(!settled){const a=await pull(state(),k);if(a)return a;if(complete!==state().gen)return null;settled=true;}
+            if(!settled){const a=await pull(state(),k);if(a)return a;if(complete!==state().gen)return fail('catchup');settled=true;}
             const a=await push(state(),k);if(a&&a.code!=='quota')return a;return (await pull(state(),k))||a;
           };
           let p=await round();
