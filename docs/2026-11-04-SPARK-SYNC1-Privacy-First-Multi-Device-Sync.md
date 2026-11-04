@@ -315,7 +315,17 @@ The review's doc corrections are applied: metadata list, padding, Worker re-orde
 | F10 | Low | Learning export and import drop the local-copy marker. An imported copy of a deleted child is then offered in the bulk share prompt without the deletion warning. | Residual. Needs explicit parent action and an old backup. |
 | F11 | Low/Doc | A phone that never syncs, with a clock 20 days fast, pins a word locally until its next sync. Each reset adds one local copy per child on phones that did not reset. | Documented. |
 
-**Narrow confirmation review of the F1/F2 repair (`f34ad29`)** by a separate fresh agent: see the PR description for its verdict.
+**Narrow confirmation review of the F1/F2 repair (`f34ad29`)** by a separate fresh agent. **Verdict: CONFIRMED.**
+- The flag `complete` is set in one place only: after the last page (`!data.more`), once the cursor save has succeeded. It is cleared when each round starts and when each pull starts. These paths were each executed and leave it cleared, so the phone keeps local copies: off, key failure, push failure, a failure in the middle of the pull, page-budget exhaustion, a failed re-enrol, an exception or going offline, and a storage failure. Reusing an in-flight round works correctly.
+- `prev` is read by the first statement of the same D1 batch as the reset. With two truly concurrent resets, only the one whose `prev` was the phone's generation re-shared.
+- Reset liveness holds:
+  - full quota (21 children shared, 20 accepted);
+  - unusable key;
+  - sync not enabled;
+  - no family row (`prev` empty, nothing re-shared).
+- Both regression tests fail on the parent commit and pass now.
+- Deployment note: a new client talking to the old Worker never re-shares automatically after a reset. That is the safe direction.
+- New residual (LOW; old code, outside the diff): `delete-child` checks membership, generation and the child's status in queries **before** its batch. The batch writes the tombstone without a generation guard. A reset that commits within milliseconds between those checks and the batch reads `prev` = the old generation. The resetting phone has downloaded completely, so it re-shares the child; the tombstone lands afterwards (an undecryptable stray record in the new generation). This needs two parents with the family code acting within milliseconds. The fix is to guard every statement of the delete-child batch with the generation (or move the checks into the batch) and check the changed rows. Listed in §17.
 
 ## 17. Exact blockers before production
 1. **Product decisions:**
@@ -333,7 +343,8 @@ The review's doc corrections are applied: metadata list, padding, Worker re-orde
 4. **Withheld-record detection on new phones.** It would need client-signed heads.
 5. A real-phone trial: two phones, airplane mode, and storage pressure on iOS Safari (where localStorage is not guaranteed under pressure).
 6. The reset and generation paths have now had a third independent review (§16). Its LOW residuals (F3–F11) are accepted for a lab trial, not for production. F4, F7 and F10 should be fixed before production.
-7. **Clock credit (F3).** The Worker accepts a phone clock within ±24 h as "agreeing" for delay credit, so a phone up to a day fast can earn early delayed-review credit that survives the merge. A tighter bound for credit (minutes) than for ordering is a small change, but it is a product trade-off for phones that are legitimately offline.
+7. **Delete-child versus a concurrent reset** (residual of the confirmation review, §16): guard the delete-child batch with the generation before production.
+8. **Clock credit (F3).** The Worker accepts a phone clock within ±24 h as "agreeing" for delay credit, so a phone up to a day fast can earn early delayed-review credit that survives the merge. A tighter bound for credit (minutes) than for ordering is a small change, but it is a product trade-off for phones that are legitimately offline.
 
 ### 17.1 Product decision matrix (V1 behaviour kept; not decided here)
 | Decision | V1 behaviour today | Options | Consequence to weigh |
