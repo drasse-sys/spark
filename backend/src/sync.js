@@ -8,7 +8,7 @@
 const SYNC_ID=/^[A-Za-z0-9_-]{21}[AQgw]$/,SYNC_IV=/^[A-Za-z0-9_-]{16}$/,SYNC_B64=/^[A-Za-z0-9_-]+$/;
 const SYNC_PROOF=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/,SYNC_DEVICE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SYNC_SKEW=86400000,SYNC_DAY=86400000;
-const SYNC_LIMITS=Object.freeze({pushRecords:40,pushBody:700000,opCt:43700,baseCt:349600,tombCt:1400,pullRows:200,pullBytes:2000000,children:20,childRows:100,familyRecords:200000,familyBytes:268435456});
+const SYNC_LIMITS=Object.freeze({pushRecords:40,pushBody:700000,opCt:43700,baseCt:349600,tombCt:1400,pullRows:200,pullBytes:2000000,children:20,childRows:100,familyRecords:200000,familyBytes:268435456,devices:200,devicesInactive:50,revokedKeepMs:366*86400000});
 const SYNC_TEXT={
   off:'Ikke funnet.',auth:'Enheten må kobles til på nytt.',rate:'For mange forespørsler på kort tid. Vent litt og prøv igjen.',
   bad:'Ugyldig forespørsel.',big:'Forespørselen er for stor.',code:'Feil familiekode.',setup:'Spark-serveren må settes opp av en forelder.',
@@ -34,20 +34,35 @@ function syncRecordOk(r,kinds){
     kinds.includes(r.kind)&&typeof r.iv==='string'&&SYNC_IV.test(r.iv)&&typeof r.ct==='string'&&r.ct.length>=22&&r.ct.length<=syncCtLimit(r.kind)&&SYNC_B64.test(r.ct);
 }
 
-// Authorization for every family operation after enrolment: this device must have an active row in this family, and the
-// phone must still be on the family's current generation.
+// SQL for "this device is a member of generation G of this family": an active registry row that proved the key of the
+// CURRENT generation. Used inside every write batch, so the check and the write are one atomic database step.
+const syncMemberSql=(fam,dev,gen)=>`EXISTS (SELECT 1 FROM sync_devices md JOIN sync_families mf ON mf.family_id=md.family_id WHERE md.family_id=${fam} AND md.device_id=${dev} AND md.status='active' AND md.gen=mf.gen AND mf.gen=${gen})`;
+// Authorization for every family operation after enrolment: this device must have an active row in this family for the
+// family's current generation, and the phone must be on that generation. (A cheap early rejection: writes re-check in SQL.)
 async function syncMember(db,fam,deviceId,gen){
-  const row=await db.prepare('SELECT f.gen AS gen, f.head AS head, f.record_count AS records, f.byte_count AS bytes, d.status AS status FROM sync_families f LEFT JOIN sync_devices d ON d.family_id=f.family_id AND d.device_id=?2 WHERE f.family_id=?1').bind(fam,deviceId).first();
+  const row=await db.prepare('SELECT f.gen AS gen, f.head AS head, f.record_count AS records, f.byte_count AS bytes, d.status AS status, d.gen AS dgen FROM sync_families f LEFT JOIN sync_devices d ON d.family_id=f.family_id AND d.device_id=?2 WHERE f.family_id=?1').bind(fam,deviceId).first();
   if(!row)return {status:403,code:'not_enrolled'};
   if(row.status==='revoked')return {status:403,code:'revoked'};
   if(row.status!=='active')return {status:403,code:'not_enrolled'};
   if(typeof gen!=='string'||!syncSame(gen,row.gen))return {status:409,code:'family_changed'};
+  // Enrolled for an earlier generation (kept by a reset so it stays revocable): it must prove the new key again.
+  if(row.dgen!==row.gen)return {status:403,code:'not_enrolled'};
   return {row};
 }
 // Tombstones of every generation, for a phone that proved the key or the family code (bounded by the child-row limit).
 async function syncTombstones(db,fam){
   const rows=await db.prepare('SELECT child_id AS child, gen, record_id AS id, iv, ct FROM sync_tombstones WHERE family_id=?1 ORDER BY deleted_at DESC, child_id LIMIT 100').bind(fam).all();
   return rows.results.map(r=>({child:r.child,gen:r.gen,id:r.id,iv:r.iv,ct:r.ct}));
+}
+// Bounded device registry. Kept: every revoked row while its token could still be valid (tokens last 365 days from
+// pairing, which is never after enrolment), and the newest `devicesInactive` rows of devices that predate the current
+// generation (so a lost phone stays listable and revocable after a reset). Everything else is housekeeping.
+function syncDevicePrune(db,fam,now){
+  const stale="status='active' AND gen<>(SELECT gen FROM sync_families WHERE family_id=?1)";
+  return [
+    db.prepare(`DELETE FROM sync_devices WHERE family_id=?1 AND ${stale} AND device_id NOT IN (SELECT device_id FROM sync_devices WHERE family_id=?1 AND ${stale} ORDER BY enrolled_at DESC, device_id LIMIT ?2)`).bind(fam,SYNC_LIMITS.devicesInactive),
+    db.prepare("DELETE FROM sync_devices WHERE family_id=?1 AND status='revoked' AND enrolled_at<?2").bind(fam,now-SYNC_LIMITS.revokedKeepMs)
+  ];
 }
 const SYNC_CODE_TEXT={not_enrolled:'enroll',revoked:'revoked',family_changed:'changed'};
 
@@ -74,8 +89,9 @@ async function syncHandle(request,env,url,c,h){
   try{
     if(route==='status'){
       if(!syncKeys(b,['v']))return error(400,'bad_request','bad');
-      const row=await db.prepare('SELECT f.gen AS gen, d.status AS status FROM sync_families f LEFT JOIN sync_devices d ON d.family_id=f.family_id AND d.device_id=?2 WHERE f.family_id=?1').bind(fam,device.deviceId).first();
-      return reply({v:1,family:!!row,enrolled:row?.status||'none',...(row?.status==='active'?{gen:row.gen}:{}),serverNow:now});
+      const row=await db.prepare('SELECT f.gen AS gen, d.status AS status, d.gen AS dgen FROM sync_families f LEFT JOIN sync_devices d ON d.family_id=f.family_id AND d.device_id=?2 WHERE f.family_id=?1').bind(fam,device.deviceId).first();
+      const member=row?.status==='active'&&row.dgen===row.gen;
+      return reply({v:1,family:!!row,enrolled:!row||!row.status?'none':row.status==='revoked'?'revoked':member?'active':'inactive',...(member?{gen:row.gen}:{}),serverNow:now});
     }
     if(route==='enroll'){
       const create=b.mode==='create';
@@ -87,7 +103,7 @@ async function syncHandle(request,env,url,c,h){
         const gen=syncId();
         await db.batch([
           db.prepare('INSERT OR IGNORE INTO sync_families (family_id, gen, verifier, head, record_count, byte_count, created_at) VALUES (?1, ?2, ?3, 0, 0, 0, ?4)').bind(fam,gen,verifier,now),
-          db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day) SELECT ?1, ?2, 'active', ?3, ?4 WHERE (SELECT gen FROM sync_families WHERE family_id=?1)=?5 ON CONFLICT(family_id, device_id) DO NOTHING").bind(fam,device.deviceId,now,syncDay(now),gen)
+          db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day, gen) SELECT ?1, ?2, 'active', ?3, ?4, ?5 WHERE (SELECT gen FROM sync_families WHERE family_id=?1)=?5 ON CONFLICT(family_id, device_id) DO NOTHING").bind(fam,device.deviceId,now,syncDay(now),gen)
         ]);
         const row=await db.prepare('SELECT gen FROM sync_families WHERE family_id=?1').bind(fam).first();
         if(row?.gen!==gen)return error(409,'family_exists','exists');
@@ -96,9 +112,23 @@ async function syncHandle(request,env,url,c,h){
       const row=await db.prepare('SELECT f.gen AS gen, f.verifier AS verifier, d.status AS status FROM sync_families f LEFT JOIN sync_devices d ON d.family_id=f.family_id AND d.device_id=?2 WHERE f.family_id=?1').bind(fam,device.deviceId).first();
       if(!row)return error(404,'no_family','none');
       if(!syncSame(verifier,row.verifier))return error(403,'key');
-      // Revocation is permanent for this device id: a lost phone that still holds the key cannot re-enrol itself.
+      // Revocation is permanent for this device id: a lost phone that still holds the key cannot re-enrol itself, and a
+      // family reset does not forgive it. Only the parent-authorized `reauthorize` (family code) lifts it.
       if(row.status==='revoked')return error(403,'revoked');
-      await db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day) VALUES (?1, ?2, 'active', ?3, ?4) ON CONFLICT(family_id, device_id) DO UPDATE SET seen_day=excluded.seen_day WHERE sync_devices.status='active'").bind(fam,device.deviceId,now,syncDay(now)).run();
+      // One atomic step: housekeeping (bounded registry), then the upsert, guarded by the generation AND the verifier read
+      // above. A reset that lands between the read and the write changes both, so a stale key enrols nothing.
+      await db.batch([
+        ...syncDevicePrune(db,fam,now),
+        db.prepare(`INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day, gen)
+          SELECT ?1, ?2, 'active', ?3, ?4, f.gen FROM sync_families f
+          WHERE f.family_id=?1 AND f.gen=?5 AND f.verifier=?6
+            AND (EXISTS (SELECT 1 FROM sync_devices x WHERE x.family_id=?1 AND x.device_id=?2) OR (SELECT COUNT(*) FROM sync_devices x WHERE x.family_id=?1)<?7)
+          ON CONFLICT(family_id, device_id) DO UPDATE SET seen_day=excluded.seen_day, enrolled_at=CASE WHEN sync_devices.gen=excluded.gen THEN sync_devices.enrolled_at ELSE excluded.enrolled_at END, gen=excluded.gen WHERE sync_devices.status='active'`).bind(fam,device.deviceId,now,syncDay(now),row.gen,verifier,SYNC_LIMITS.devices)
+      ]);
+      const post=await db.prepare('SELECT f.gen AS gen, d.status AS status, d.gen AS dgen FROM sync_families f LEFT JOIN sync_devices d ON d.family_id=f.family_id AND d.device_id=?2 WHERE f.family_id=?1').bind(fam,device.deviceId).first();
+      if(post?.status==='revoked')return error(403,'revoked');
+      if(post?.gen!==row.gen)return error(409,'family_changed','changed');
+      if(post.status!=='active'||post.dgen!==row.gen)return error(507,'quota');
       return reply({v:1,gen:row.gen,serverNow:now,tombstones:await syncTombstones(db,fam)});
     }
     if(route==='push'){
@@ -122,7 +152,7 @@ async function syncHandle(request,env,url,c,h){
           if(st===undefined){
             // Only active children count: deleted ids are bounded separately (newest 100 kept, see delete-child).
             if(active>=SYNC_LIMITS.children){decided.set(r.id,'quota');continue;}
-            status.set(r.child,'active');created.push(r.child);active++;total++;
+            status.set(r.child,'active');created.push({child:r.child,id:r.id});active++;total++;
           }else{decided.set(r.id,st==='deleted'?'child_deleted':'child_exists');continue;}
         }else if(st!=='active'){decided.set(r.id,st==='deleted'?'child_deleted':'child_unknown');continue;}
         inserts.push({id:r.id,child:r.child,kind:r.kind,iv:r.iv,ct:r.ct});bytes+=r.ct.length;
@@ -130,25 +160,46 @@ async function syncHandle(request,env,url,c,h){
       if(Number(m.row.records)+inserts.length>SYNC_LIMITS.familyRecords||Number(m.row.bytes)+bytes>SYNC_LIMITS.familyBytes)return error(507,'quota');
       const ck=Math.abs(now-b.clientNow)<=SYNC_SKEW?1:0;
       if(inserts.length)await db.batch([
-        db.prepare("INSERT OR IGNORE INTO sync_children (family_id, child_id, status, created_at) SELECT ?1, value, 'active', ?2 FROM json_each(?3)").bind(fam,now,JSON.stringify(created)),
-        // Conditions are re-checked inside the transaction, so a revocation, reset or deletion that lands between the
-        // reads above and this write inserts nothing. Sequence numbers continue the family head without gaps.
+        // Every statement is conditioned, inside the transaction, on the same facts: this device is a member of THIS
+        // generation, the child is (or is being created as) active, the id is unused. A reset, revocation or deletion that
+        // landed after the reads above therefore leaves no trace: no ghost child, no record, no quota use.
+        // A child row is created only together with its base (the record id must be unused) and only while the family
+        // has room, counted inside the database, so concurrent first pushes cannot exceed the quota either.
+        db.prepare(`INSERT INTO sync_children (family_id, child_id, status, created_at)
+          SELECT ?1, json_extract(j.value,'$.child'), 'active', ?2 FROM json_each(?3) j
+          WHERE ${syncMemberSql('?1','?5','?4')}
+            AND NOT EXISTS (SELECT 1 FROM sync_children c WHERE c.family_id=?1 AND c.child_id=json_extract(j.value,'$.child'))
+            AND NOT EXISTS (SELECT 1 FROM sync_records r WHERE r.family_id=?1 AND r.record_id=json_extract(j.value,'$.id'))
+            AND (SELECT COUNT(*) FROM sync_children c WHERE c.family_id=?1 AND c.status='active')+CAST(j.key AS INTEGER)+1<=?6`).bind(fam,now,JSON.stringify(created),b.gen,device.deviceId,SYNC_LIMITS.children),
+        // Sequence numbers continue the family head without gaps.
         db.prepare(`INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct)
           SELECT ?1, f.head + ROW_NUMBER() OVER (ORDER BY CAST(j.key AS INTEGER)), json_extract(j.value,'$.id'), json_extract(j.value,'$.child'), json_extract(j.value,'$.kind'), ?2, ?3, json_extract(j.value,'$.iv'), json_extract(j.value,'$.ct')
           FROM json_each(?4) j JOIN sync_families f ON f.family_id=?1
           WHERE f.gen=?5
-            AND EXISTS (SELECT 1 FROM sync_devices d WHERE d.family_id=?1 AND d.device_id=?6 AND d.status='active')
+            AND ${syncMemberSql('?1','?6','?5')}
             AND EXISTS (SELECT 1 FROM sync_children ch WHERE ch.family_id=?1 AND ch.child_id=json_extract(j.value,'$.child') AND ch.status='active')
             AND NOT EXISTS (SELECT 1 FROM sync_records r WHERE r.family_id=?1 AND r.record_id=json_extract(j.value,'$.id'))`).bind(fam,now,ck,JSON.stringify(inserts),b.gen,device.deviceId),
         db.prepare(`UPDATE sync_families SET
             record_count=record_count+(SELECT COUNT(*) FROM sync_records r WHERE r.family_id=?1 AND r.seq>sync_families.head),
             byte_count=byte_count+(SELECT COALESCE(SUM(LENGTH(r.ct)),0) FROM sync_records r WHERE r.family_id=?1 AND r.seq>sync_families.head),
             head=MAX(head,COALESCE((SELECT MAX(seq) FROM sync_records r WHERE r.family_id=?1),0))
-          WHERE family_id=?1`).bind(fam)
+          WHERE family_id=?1`).bind(fam),
+        // Belt and braces: a child row created by this request that ended up without any record is removed again.
+        db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='active' AND child_id IN (SELECT json_extract(value,'$.child') FROM json_each(?2)) AND NOT EXISTS (SELECT 1 FROM sync_records r WHERE r.family_id=?1 AND r.child_id=sync_children.child_id)").bind(fam,JSON.stringify(created))
       ]);
       await db.prepare('UPDATE sync_devices SET seen_day=?3 WHERE family_id=?1 AND device_id=?2').bind(fam,device.deviceId,syncDay(now)).run();
       const stored=(await db.prepare('SELECT record_id AS id, seq, received_at AS at, clock_ok AS ck FROM sync_records WHERE family_id=?1 AND record_id IN (SELECT value FROM json_each(?2))').bind(fam,ids).all()).results;
       const byId=new Map(stored.map(r=>[r.id,r]));
+      // A record that was neither stored nor refused for a reason of its own means a condition changed after the reads.
+      // If this phone's generation or membership is the reason, say so (409/403) instead of a silent "retry".
+      const unresolved=b.records.filter(r=>!byId.has(r.id)&&!decided.has(r.id));
+      if(unresolved.length){
+        const again=await syncMember(db,fam,device.deviceId,b.gen);if(!again.row)return error(again.status,again.code,SYNC_CODE_TEXT[again.code]);
+        // Still a member: if a concurrent push took the last child slot, report it as the quota (as the reads above would have).
+        const now_=Number((await db.prepare("SELECT COUNT(*) AS n FROM sync_children WHERE family_id=?1 AND status='active'").bind(fam).first())?.n||0);
+        const made=new Set(created.map(c=>c.child));
+        if(now_>=SYNC_LIMITS.children)for(const r of unresolved)if(made.has(r.child)&&!byId.has(r.id))decided.set(r.id,r.kind==='base'?'quota':'child_unknown');
+      }
       return reply({v:1,serverNow:now,results:b.records.map(r=>{
         const s=byId.get(r.id);
         if(s)return {id:r.id,status:known.has(r.id)?'dup':'ok',seq:Number(s.seq),at:Number(s.at),ck:Number(s.ck)};
@@ -173,22 +224,35 @@ async function syncHandle(request,env,url,c,h){
     if(route==='devices'){
       if(!syncKeys(b,['v','gen']))return error(400,'bad_request','bad');
       const m=await syncMember(db,fam,device.deviceId,b.gen);if(!m.row)return error(m.status,m.code,SYNC_CODE_TEXT[m.code]);
-      const rows=await db.prepare('SELECT device_id AS device, status, enrolled_at AS enrolledAt, seen_day AS seenDay FROM sync_devices WHERE family_id=?1 ORDER BY status=\'active\' DESC, enrolled_at, device_id LIMIT 50').bind(fam).all();
+      // 'active' = member of the current generation; 'inactive' = enrolled before a reset (still revocable); 'revoked'.
+      const rows=await db.prepare("SELECT d.device_id AS device, CASE WHEN d.status='revoked' THEN 'revoked' WHEN d.gen=f.gen THEN 'active' ELSE 'inactive' END AS status, d.enrolled_at AS enrolledAt, d.seen_day AS seenDay FROM sync_devices d JOIN sync_families f ON f.family_id=d.family_id WHERE d.family_id=?1 ORDER BY CASE WHEN d.status='revoked' THEN 2 WHEN d.gen=f.gen THEN 0 ELSE 1 END, d.enrolled_at, d.device_id LIMIT 200").bind(fam).all();
       return reply({v:1,devices:rows.results.map(r=>({device:r.device,status:r.status,enrolledAt:Number(r.enrolledAt),seenDay:Number(r.seenDay),self:r.device===device.deviceId}))});
     }
     // route === 'admin': destructive or family-wide operations. Each needs the family code, which phones do not store,
     // so a stolen phone (token and key) cannot revoke other phones, delete children or reset the family.
-    const op=b.op,shape={revoke:['v','gen','op','code','device'],'delete-child':['v','gen','op','code','child','record'],reset:['v','op','code','proof']}[op];
+    const op=b.op,shape={revoke:['v','gen','op','code','device'],reauthorize:['v','op','code','device'],'delete-child':['v','gen','op','code','child','record'],reset:['v','op','code','proof']}[op];
     if(!shape||!syncKeys(b,shape)||typeof b.code!=='string')return error(400,'bad_request','bad');
-    if(op==='revoke'&&(typeof b.device!=='string'||!SYNC_DEVICE.test(b.device)))return error(400,'bad_request','bad');
+    if((op==='revoke'||op==='reauthorize')&&(typeof b.device!=='string'||!SYNC_DEVICE.test(b.device)))return error(400,'bad_request','bad');
     if(op==='delete-child'&&(typeof b.child!=='string'||!SYNC_ID.test(b.child)||!syncRecordOk({...b.record,child:b.child,kind:'tombstone'},['tombstone'])))return error(400,'bad_request','bad');
     if(op==='reset'&&(typeof b.proof!=='string'||!SYNC_PROOF.test(b.proof)))return error(400,'bad_request','bad');
     if(!env.FAMILY_CODE)return error(503,'setup');
     if(!h.sameCode(b.code,env.FAMILY_CODE))return error(401,'family_code','code');
+    if(op==='reauthorize'){
+      // The only way to lift a revocation of the same device id: the family code (a parent), from any phone, including the
+      // revoked one. The device becomes INACTIVE, not a member: it must still prove the family key with a normal join.
+      // (A replaced phone needs none of this: pairing it again gives a new device id, which only needs the key.)
+      const r=await db.prepare("UPDATE sync_devices SET status='active', gen='' WHERE family_id=?1 AND device_id=?2 AND status='revoked'").bind(fam,b.device).run();
+      if(!r.meta?.changes)return error(404,'device_unknown','device');
+      return reply({v:1,reauthorized:true});
+    }
     if(op==='reset'){
-      // Lost key or key rotation: the family's records and active children and enrolments are deleted and a new generation
-      // starts with the caller. Kept: revocations (a revoked id stays revoked), deleted child ids (never accepted again)
+      // Lost key or key rotation: the family's records, active children and enrolments are replaced by a new generation
+      // that starts with the caller. Kept: revocations (a revoked id stays revoked), every earlier device row (now
+      // INACTIVE: it must prove the new key, and stays listable and revocable), deleted child ids (never accepted again)
       // and tombstones (handed to re-joining phones). Phones keep their local data.
+      // A revoked caller cannot reset: it would mint its own key and re-enrol itself, undoing the revocation.
+      const self=await db.prepare('SELECT status FROM sync_devices WHERE family_id=?1 AND device_id=?2').bind(fam,device.deviceId).first();
+      if(self?.status==='revoked')return error(403,'revoked');
       const gen=syncId(),verifier=await syncDigest(b.proof);
       // `prev` (read inside the same transaction) is the generation this reset replaced. A phone re-shares automatically
       // only when it equals the generation it has just downloaded completely: a concurrent reset (and deletions in its
@@ -197,36 +261,57 @@ async function syncHandle(request,env,url,c,h){
         db.prepare('SELECT gen FROM sync_families WHERE family_id=?1').bind(fam),
         db.prepare('DELETE FROM sync_records WHERE family_id=?1').bind(fam),
         db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='active'").bind(fam),
-        db.prepare("DELETE FROM sync_devices WHERE family_id=?1 AND status='active'").bind(fam),
         db.prepare('INSERT INTO sync_families (family_id, gen, verifier, head, record_count, byte_count, created_at) VALUES (?1, ?2, ?3, 0, 0, 0, ?4) ON CONFLICT(family_id) DO UPDATE SET gen=excluded.gen, verifier=excluded.verifier, record_count=0, byte_count=0').bind(fam,gen,verifier,now),
-        // The caller proved the family code (the parent), so its own device is (re)activated.
-        db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day) VALUES (?1, ?2, 'active', ?3, ?4) ON CONFLICT(family_id, device_id) DO UPDATE SET status='active', enrolled_at=excluded.enrolled_at, seen_day=excluded.seen_day").bind(fam,device.deviceId,now,syncDay(now))
+        // The caller proved the family code (the parent), so its own device is (re)enrolled for the new generation. A revoked
+        // row is never touched (the WHERE below), whatever happened since the check above.
+        db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day, gen) VALUES (?1, ?2, 'active', ?3, ?4, ?5) ON CONFLICT(family_id, device_id) DO UPDATE SET enrolled_at=excluded.enrolled_at, seen_day=excluded.seen_day, gen=excluded.gen WHERE sync_devices.status='active'").bind(fam,device.deviceId,now,syncDay(now),gen),
+        ...syncDevicePrune(db,fam,now)
       ]);
       return reply({v:1,gen,prev:before.results[0]?.gen||'',serverNow:now,tombstones:await syncTombstones(db,fam)});
     }
     const m=await syncMember(db,fam,device.deviceId,b.gen);if(!m.row)return error(m.status,m.code,SYNC_CODE_TEXT[m.code]);
     if(op==='revoke'){
-      const r=await db.prepare("UPDATE sync_devices SET status='revoked' WHERE family_id=?1 AND device_id=?2").bind(fam,b.device).run();
-      if(!r.meta?.changes)return error(404,'device_unknown','device');
+      // Conditioned on the generation this phone was authorized in; the target may be active, inactive or already revoked.
+      const r=await db.prepare("UPDATE sync_devices SET status='revoked' WHERE family_id=?1 AND device_id=?2 AND EXISTS (SELECT 1 FROM sync_families WHERE family_id=?1 AND gen=?3)").bind(fam,b.device,m.row.gen).run();
+      if(!r.meta?.changes){
+        const again=await syncMember(db,fam,device.deviceId,b.gen);if(!again.row)return error(again.status,again.code,SYNC_CODE_TEXT[again.code]);
+        return error(404,'device_unknown','device');
+      }
       return reply({v:1,revoked:true});
     }
     // delete-child: the child's records are deleted; a tombstone (encrypted by the requesting phone, so other phones can
     // verify it came from a key holder) takes the next sequence number, and the child id never accepts records again.
-    const child=await db.prepare("SELECT status FROM sync_children WHERE family_id=?1 AND child_id=?2").bind(fam,b.child).first();
-    if(child?.status!=='active')return error(404,'child_unknown','child');
-    await db.batch([
-      db.prepare('DELETE FROM sync_records WHERE family_id=?1 AND child_id=?2').bind(fam,b.child),
-      db.prepare('INSERT OR REPLACE INTO sync_tombstones (family_id, child_id, gen, record_id, iv, ct, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)').bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now),
-      db.prepare("UPDATE sync_children SET status='deleted', deleted_at=?3 WHERE family_id=?1 AND child_id=?2").bind(fam,b.child,now),
-      db.prepare("INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, head+1, ?2, ?3, 'tombstone', ?4, 1, ?5, ?6 FROM sync_families WHERE family_id=?1 AND NOT EXISTS (SELECT 1 FROM sync_records WHERE family_id=?1 AND record_id=?2)").bind(fam,b.record.id,b.child,now,b.record.iv,b.record.ct),
+    // Every statement carries the same guard (this phone is a member of THIS generation; the child is active in it), so
+    // the check and the deletion are one atomic step. The child's status flips LAST, and its changed-row count is the
+    // outcome: 1 = this request deleted the child; 0 = it did not (a reset, revocation or another deletion got there first).
+    const deleted=async()=>{
+      const c=await db.prepare('SELECT c.status AS status, t.gen AS tgen FROM sync_children c LEFT JOIN sync_tombstones t ON t.family_id=c.family_id AND t.child_id=c.child_id WHERE c.family_id=?1 AND c.child_id=?2').bind(fam,b.child).first();
+      return c;
+    };
+    const known=await deleted();
+    // Already deleted in this generation (a retry after a lost reply, or the same request twice): done, changes nothing.
+    if(known?.status==='deleted'&&known.tgen===m.row.gen)return reply({v:1,deleted:true});
+    if(known?.status!=='active')return error(404,'child_unknown','child');
+    const guard=`${syncMemberSql('?1','?8','?3')} AND EXISTS (SELECT 1 FROM sync_children g WHERE g.family_id=?1 AND g.child_id=?2 AND g.status='active')`;
+    const out=await db.batch([
+      db.prepare(`DELETE FROM sync_records WHERE family_id=?1 AND child_id=?2 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
+      db.prepare(`INSERT OR REPLACE INTO sync_tombstones (family_id, child_id, gen, record_id, iv, ct, deleted_at) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
+      db.prepare(`INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, head+1, ?4, ?2, 'tombstone', ?7, 1, ?5, ?6 FROM sync_families WHERE family_id=?1 AND gen=?3 AND ${guard} AND NOT EXISTS (SELECT 1 FROM sync_records WHERE family_id=?1 AND record_id=?4)`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
       db.prepare(`UPDATE sync_families SET head=MAX(head,COALESCE((SELECT MAX(seq) FROM sync_records WHERE family_id=?1),0)),
-          record_count=(SELECT COUNT(*) FROM sync_records WHERE family_id=?1), byte_count=(SELECT COALESCE(SUM(LENGTH(ct)),0) FROM sync_records WHERE family_id=?1) WHERE family_id=?1`).bind(fam),
+          record_count=(SELECT COUNT(*) FROM sync_records WHERE family_id=?1), byte_count=(SELECT COALESCE(SUM(LENGTH(ct)),0) FROM sync_records WHERE family_id=?1) WHERE family_id=?1 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
+      db.prepare(`UPDATE sync_children SET status='deleted', deleted_at=?7 WHERE family_id=?1 AND child_id=?2 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
       // Bounded: the newest 100 deleted ids and tombstones are kept. A phone offline for longer than 100 deletions that still
       // holds an older one gets child_unknown and keeps a local copy, which is never shared again automatically.
+      // (Maintenance only; it runs after the flip and touches only deleted rows.)
       db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='deleted' AND child_id NOT IN (SELECT child_id FROM sync_children WHERE family_id=?1 AND status='deleted' ORDER BY deleted_at DESC, child_id LIMIT 100)").bind(fam),
       db.prepare('DELETE FROM sync_tombstones WHERE family_id=?1 AND child_id NOT IN (SELECT child_id FROM sync_tombstones WHERE family_id=?1 ORDER BY deleted_at DESC, child_id LIMIT 100)').bind(fam)
     ]);
-    return reply({v:1,deleted:true});
+    if(out[4].meta?.changes===1)return reply({v:1,deleted:true});
+    // Not applied. Say why: the phone's generation or membership changed, the child was deleted meanwhile, or it is unknown.
+    const again=await syncMember(db,fam,device.deviceId,b.gen);if(!again.row)return error(again.status,again.code,SYNC_CODE_TEXT[again.code]);
+    const now2=await deleted();
+    if(now2?.status==='deleted'&&now2.tgen===again.row.gen)return reply({v:1,deleted:true});
+    return error(404,'child_unknown','child');
   }catch{
     // Content-free: the route name only. Never a body, SQL, id, key or token.
     try{console.log(JSON.stringify({evt:'sync_failure',route,t:Date.now()}));}catch{}

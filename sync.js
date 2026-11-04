@@ -332,6 +332,13 @@
       if(r.status!==200)return {ok:false,code:r.data?.code||'error',error:r.data?.error||''};
       const t=state();t.deleted=[...t.deleted,kid.id].slice(-LIMITS.ids);save(t);d.removeKid(kid);d.saveKids();return {ok:true};
     }
+    // Lifts the revocation of this exact device id (parent only: family code). The device is then merely allowed to try again:
+    // it still has to prove the family key with a normal join. Replacing a phone needs none of this (pair it again).
+    async function reauthorize({code,device}){
+      if(!state().enabled)return {ok:false,code:'off'};
+      const r=await d.request('/sync/admin',{v:1,op:'reauthorize',code:String(code||''),device:String(device||'')});
+      return r.status===200?{ok:true}:{ok:false,code:r.data?.code||'error',error:r.data?.error||''};
+    }
     async function revoke({code,device}){const r=await admin({op:'revoke',code:String(code||''),device:String(device||'')});return r.status===200?{ok:true}:{ok:false,code:r.data?.code||'error',error:r.data?.error||''};}
     async function devices(){const s=state();const r=await d.request('/sync/devices',{v:1,gen:s.gen});return r.status===200&&Array.isArray(r.data?.devices)?{ok:true,devices:r.data.devices}:{ok:false,code:r.data?.code||'error'};}
     function fail(code){const s=state();s.status=code;save(s);return {ok:false,code};}
@@ -441,7 +448,7 @@
       })().finally(()=>{running=null;});
       return running;
     }
-    return {state,enqueue,profileChanged,share,shareAll,create,join,reset,hide,unhide,deleteChild,revoke,devices,sync,materialize,fork,newId};
+    return {state,enqueue,profileChanged,share,shareAll,create,join,reset,hide,unhide,deleteChild,revoke,reauthorize,devices,sync,materialize,fork,newId};
   }
   root.SparkSync={PROTOCOL,WINDOW,LIMITS,ID,b64url,unb64url,keyText,parseKey,deriveKeys,seal,open,checkPayload,when,orderKey,order,apply,fold,checkpoint,emptySync,normalizeSync,materialize,profileOf,blank,skillOp,createEngine};
 })(globalThis);
