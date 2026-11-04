@@ -401,6 +401,9 @@
         if(!data.more){
           const deleted=new Set(data.children.filter(c=>c&&c.status==='deleted').map(c=>c.child));
           for(const kid of shared())if(deleted.has(kid.id)&&!s.deleted.includes(kid.id))fork(kid);
+          // A child this phone already deleted from the family (or removed here with nothing unsent) whose removal was not
+          // persisted (sync state saved, then spark_kids failed to save) is removed now; its records are skipped above.
+          for(const kid of shared())if(s.deleted.includes(kid.id)||s.hidden.includes(kid.id)&&!kid.sync.pending.length)d.removeKid(kid);
         }
         for(const kid of changed)if(kid.sync)mat(kid);
         if(!d.saveKids())return fail('storage');

@@ -729,3 +729,26 @@ test('review-3 F2: a download stopped by the page budget is not "complete": the 
   assert.ok(!(await familyChildren(B)).includes('Xena'),'the family-deleted child is not shared again');
   assert.ok(B.kid('Xena')&&!B.kid('Xena').sync&&B.kid('Xena').fork,'kept on B as a local copy only');
 });
+
+/* Bounded whole-SYNC1 red-team review. */
+// Storage pressure: the small sync-state write succeeds, the large spark_kids write fails (once armed).
+function kidsSaveFailsOnce(dev){
+  let armed=false,reads=0;
+  Object.defineProperty(dev,'storageOk',{configurable:true,get(){if(!armed)return true;reads++;if(reads>=2)armed=false;return reads===1;}});
+  return {arm(){armed=true;reads=0;},restore(){Object.defineProperty(dev,'storageOk',{configurable:true,writable:true,value:true});}};
+}
+test('red-team RT-F1: a family deletion (or a removal here) whose spark_kids save failed does not leave the child on this phone after a reload',async()=>{
+  const {fam,A,B}=await pair('rtf1');
+  const io=kidsSaveFailsOnce(A);A.intercept=async(path,body,go)=>{const r=await go();if(path==='/sync/admin')io.arm();return r;};
+  assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:A.kid('Ada')}),{ok:true});A.intercept=null;io.restore();
+  A.reload();assert.ok(A.kid('Ada')?.sync,'the failed save left the deleted child in spark_kids (the storage fault is real)');
+  assert.deepEqual(await A.sync(),{ok:true});assert.equal(A.kid('Ada'),undefined,'removed at the next round');
+  A.reload();assert.equal(A.kid('Ada'),undefined,'and the removal is persisted');
+  await B.sync();assert.equal(B.kid('Ada'),undefined);
+  // Remove from this phone ("Fjern fra denne telefonen"), same storage fault.
+  const p=await pair('rtf1b');const io2=kidsSaveFailsOnce(p.B);io2.arm();
+  assert.deepEqual(p.B.engine.hide(p.B.kid('Ada')),{ok:true});io2.restore();
+  p.B.reload();assert.ok(p.B.kid('Ada')?.sync);
+  assert.deepEqual(await p.B.sync(),{ok:true});assert.equal(p.B.kid('Ada'),undefined,'removed here again; the family copy stays');
+  assert.ok(p.A.kid('Ada')?.sync);assert.ok(p.B.engine.unhide());assert.deepEqual(await p.B.sync(),{ok:true});assert.ok(p.B.kid('Ada')?.sync,'fetching removed children brings it back');
+});
