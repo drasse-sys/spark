@@ -20,7 +20,7 @@
   const ID=/^[A-Za-z0-9_-]{21}[AQgw]$/;      // 16 random bytes, canonical unpadded base64url
   const IV=/^[A-Za-z0-9_-]{16}$/;             // 12 bytes
   const B64=/^[A-Za-z0-9_-]+$/;
-  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:2000,ids:200,pending:5000});
+  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:10000,ids:200,pending:5000});
   const HELPED=['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'];
   const ERRORS=['slurv','fakta','metode','begrep','tolking'],CONFIDENCE=['sikker','usikker','gjetter'];
   const enc=new TextEncoder(),dec=new TextDecoder();
@@ -234,7 +234,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
     }
     const shared=()=>d.kids().filter(k=>k.sync);
     // `seen` is a plain array in storage; a Set beside it (keyed by the array, rebuilt if the array changed behind our back)
-    // keeps the lookup O(1) for a 30,000-entry window.
+    // keeps the lookup O(1) for a 10,000-entry window.
     const seenCache=new WeakMap();
     function seenSet(s){let c=seenCache.get(s.seen);if(!c||c.n!==s.seen.length){c={set:new Set(s.seen),n:s.seen.length};seenCache.set(s.seen,c);}return c;}
     function seen(s,id){return seenSet(s).set.has(id.slice(0,16));}

@@ -342,7 +342,7 @@ async function longHistory({reviews,realm,name,stepDays=5}){
 const adaView=dev=>JSON.stringify(dev.kids.filter(k=>k.name==='Ada').map(k=>snapshotOne(k)));
 const snapshotOne=k=>{const s=JSON.parse(snapshot({kids:[k]}));return s;};
 test('B3 (reproducer, lowered retention bound): with more records than the dedupe window, hide → unhide re-applies old reviews',async()=>{
-  const small=clientRealm(cut('seen:2000','seen:40'));
+  const small=clientRealm(cut('seen:10000','seen:40'));
   const {A,B}=await longHistory({reviews:240,realm:small,name:'low'});
   assert.equal(snapshot(A),snapshot(B),'converged before hiding');
   assert.deepEqual(B.engine.hide(B.kid('Bo')),{ok:true});
@@ -352,13 +352,13 @@ test('B3 (reproducer, lowered retention bound): with more records than the dedup
   assert.equal(adaView(B),adaView(A));
 });
 test('B3 (negative control): without the watermark the same scenario diverges',async()=>{
-  const broken=clientRealm(s=>cut('rec.seq<=(sync.wm||0)||','')(cut('seen:2000','seen:40')(s)));
+  const broken=clientRealm(s=>cut('rec.seq<=(sync.wm||0)||','')(cut('seen:10000','seen:40')(s)));
   const {A,B}=await longHistory({reviews:240,realm:broken,name:'neg'});
   B.engine.hide(B.kid('Bo'));B.engine.unhide();await B.sync();
   assert.notEqual(snapshot(B),snapshot(A),'the defence is what makes the difference');
 });
 test('B3: hide → restart → unhide, twice, with a local save failure in the middle: always exactly the family state; storage stays bounded',async()=>{
-  const small=clientRealm(cut('seen:2000','seen:40'));
+  const small=clientRealm(cut('seen:10000','seen:40'));
   const {clock,A,B}=await longHistory({reviews:360,realm:small,name:'rst'});
   const family=snapshot(A),logOf=d=>d.kids.filter(k=>k.sync).map(k=>k.sync.log.length);
   assert.ok(Math.max(...logOf(B))<=140,'unfolded log is bounded by the order window, not by history: '+logOf(B));
@@ -440,7 +440,7 @@ test('B3 (real bound): more than 30,000 records on one child; "Hent fjernede bar
     {const x=facts(B);assert.equal(x.cold,f0.cold,'cold credit counted once');assert.deepEqual(x.word,f0.word,'word credit counted once');assert.equal(x.sessions.join(),f0.sessions.join(),'session summaries unchanged');}
     const maxLog=Math.max(...B.kids.filter(k=>k.sync).map(k=>k.sync.log.length));
     assert.ok(maxLog<=1500,'local log stays bounded however long the history: '+maxLog);
-    assert.ok(JSON.stringify(B.kids).length<400000,'phone storage stays bounded: '+JSON.stringify(B.kids).length);
+    assert.ok(JSON.stringify(B.kids).length<700000,'phone storage stays bounded: '+JSON.stringify(B.kids).length);
   }
   assert.equal(snapshot(B),truth);
 });
@@ -468,7 +468,7 @@ test('old-generation records cannot enter the new generation (rejected at the do
   assert.equal(snapshot(A),snapshot(B));
 });
 test('replay inflates nothing: re-downloading everything, even with the recent-id window emptied, leaves evidence, mastery and word credit unchanged',async()=>{
-  const small=clientRealm(cut('seen:2000','seen:40'));
+  const small=clientRealm(cut('seen:10000','seen:40'));
   const {A,B}=await longHistory({reviews:240,realm:small,name:'rp'});
   const facts=d=>JSON.stringify(canon(d.kids.map(k=>({totals:k.learning.totals,skills:Object.entries(k.learning.skills).map(([id,r])=>[id,r.box,r.due,r.ev.map(e=>e.id),r.independentAt,r.retainedAt]),words:k.learning.items.map(w=>[w.id,w.box,w.due,w.lastAt,w.ev.map(e=>[e.t,e.ok,e.delayed])])}))));
   const before=facts(B),snap=snapshot(B);
