@@ -48,7 +48,8 @@
     const last=plausible(peak)?peak:plausible(prior)?prior:0;
     const jump=!plausible(prior)||(plausible(peak)&&peak>prior+CLOCK_SKEW);
     const t=Math.max(e.t,last);
-    const delayed=!jump&&e.k==='cold'&&last>0&&t-last>=DAY&&e.sid!==lastSession;
+    // `mayDelay:false` (SYNC1 merge) caps delay credit at what the recording device itself granted; live calls never set it.
+    const delayed=e.mayDelay!==false&&!jump&&e.k==='cold'&&last>0&&t-last>=DAY&&e.sid!==lastSession;
     if(jump)r.firstColdAt=null;// A retention interval cannot span a clock discontinuity.
     const v={t,s:level(e.s),ok:e.ok,k:e.k,e:['slurv','fakta','metode','begrep','tolking'].includes(e.e)?e.e:'',c:['sikker','usikker','gjetter'].includes(e.c)?e.c:'',sid:String(e.sid).slice(0,80),id:String(e.id).slice(0,120),verified:e.verified===true,delayed};
     // Observations never enter authoritative evidence or change its clock/checkpoints.
@@ -71,6 +72,22 @@
     r.lastAt=v.t;r.lastSession=v.sid;if(r.observations?.length)r.seenObs=r.observations.at(-1).id;else delete r.seenObs;
     r.ev.push(v);r.ev=r.ev.slice(-8);
     return v;
+  }
+  // Glossary operations shared by the live UI and the SYNC1 merge, so both produce identical word state.
+  function addWord(memory,w){
+    const items=memory.items ||= [];
+    if(!w||typeof w.word!=='string'||typeof w.meaning!=='string'||!Number.isSafeInteger(w.t)||items.some(i=>i.word===w.word&&i.meaning===w.meaning)||items.length>=60)return null;
+    const item={word:w.word,meaning:w.meaning,sentence:typeof w.sentence==='string'?w.sentence:'',id:w.id,box:1,due:w.t+DAY,ev:[]};
+    items.push(item);return item;
+  }
+  // `r.t` is the review time; `mayDelay:false` caps delay credit (SYNC1) exactly as in `event`.
+  function reviewWord(memory,r){
+    const w=(memory.items||[]).find(w=>w.id===r?.wordId);if(!w||!Number.isSafeInteger(r.t))return null;
+    const now=r.t,s=r.s,delayed=r.mayDelay!==false&&!!w.lastAt&&now-w.lastAt>=DAY;
+    if(r.ok&&s<=1&&r.c!=='gjetter'&&delayed)w.box=Math.min(5,(w.box||1)+1);else if(!r.ok||s>=3)w.box=Math.max(1,(w.box||1)-1);
+    w.box ||=1;w.lastAt=now;w.due=now+SPACING[w.box-1]*DAY;
+    w.ev ||= [];w.ev.push({t:now,s,ok:r.ok,delayed});w.ev=w.ev.slice(-8);
+    return {delayed};
   }
   // A due time beyond the longest spacing from `now` cannot come from a consistent clock and is due now.
   const dueBy=(d,now)=>d<=now||d>now+SPACING.at(-1)*DAY+CLOCK_SKEW;
@@ -216,5 +233,5 @@
     const r=memory.skills[t.skill];
     return JSON.stringify({task:t.id,skill:t.skill,s:t.s,state:state(r),kind:session.check?.kind||'task',helped:r?.helped||'',reading:session.readingGoal||''}).slice(0,300);
   }
-  root.SparkLearning={DAY,CLOCK_SKEW,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,due,dueWords,generate,round,checkItem,activity,boundSession,aggregate,normalizeMemory,quarantine,trust,prune,migrate,context};
+  root.SparkLearning={DAY,CLOCK_SKEW,VERSION,MIGRATION,SPACING,LIMITS,CATALOG,skillId,level,task,support,marker,empty,state,event,addWord,reviewWord,due,dueWords,generate,round,checkItem,activity,boundSession,aggregate,normalizeMemory,quarantine,trust,prune,migrate,context};
 })(globalThis);

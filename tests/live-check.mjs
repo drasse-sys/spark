@@ -9,7 +9,7 @@ const origin='https://drasse-sys.github.io';
 // Expected Worker generation is read from source, so a release only bumps GENERATION in backend/src/index.js.
 const expectedGeneration=/const GENERATION = '([^']+)'/.exec(await readFile(new URL('backend/src/index.js',root),'utf8'))[1];
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
-const files=['spark.html','sw.js','manifest.json','index.html','icon-192.png','icon-512.png','arithmetic.js','learning.js','visuals.js','learning-ui.js'];
+const files=['spark.html','sw.js','manifest.json','index.html','icon-192.png','icon-512.png','arithmetic.js','learning.js','visuals.js','learning-ui.js','sync.js','sync-ui.js'];
 const checks=[];
 for(const file of files){
   const r=await fetch(frontend+file+'?generation='+expectedGeneration+'',{cache:'no-store',signal:AbortSignal.timeout(20000)});assert.equal(r.status,200,file);

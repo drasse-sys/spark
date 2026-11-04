@@ -40,12 +40,14 @@ jobs:
 
       - name: Node test suite
         working-directory: tests
+        env:
+          WRANGLER_SEND_METRICS: "false"
         run: npm test
 
       - name: JavaScript syntax checks
         run: |
           set -e
-          for f in arithmetic.js learning.js visuals.js learning-ui.js sw.js backend/src/index.js tests/*.mjs; do
+          for f in arithmetic.js learning.js visuals.js learning-ui.js sync.js sync-ui.js sw.js backend/src/index.js backend/src/sync.js tests/*.mjs; do
             node --check "$f"
           done
           node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))"
@@ -55,6 +57,12 @@ jobs:
         env:
           WRANGLER_SEND_METRICS: "false"
         run: npx wrangler deploy --dry-run
+
+      - name: Worker dry-run, isolated sync-lab environment (no deploy)
+        working-directory: backend
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: npx wrangler deploy --dry-run --env sync-lab
 
       - name: Install Chromium (Playwright pinned by lockfile)
         working-directory: tests
@@ -71,3 +79,8 @@ jobs:
 
       - name: Browser mobile touch check
         run: node tests/browser-mobile-touch-check.mjs
+
+      - name: Browser sync check (two phones, local D1)
+        env:
+          WRANGLER_SEND_METRICS: "false"
+        run: node tests/browser-sync-check.mjs

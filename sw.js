@@ -1,6 +1,6 @@
 /* Spark stabilization generation. API traffic never enters this cache. */
-const CACHE = 'spark-learning-20261103-int1';
-const FILES = ['./spark.html', './manifest.json', './arithmetic.js', './learning.js', './visuals.js', './learning-ui.js', './icon-192.png', './icon-512.png'];
+const CACHE = 'spark-learning-20261104-sync1';
+const FILES = ['./spark.html', './manifest.json', './arithmetic.js', './learning.js', './visuals.js', './learning-ui.js', './sync.js', './sync-ui.js', './icon-192.png', './icon-512.png'];
 const STATIC_URLS = new Set(FILES.map(path => new URL(path, self.registration.scope).href));
 
 self.addEventListener('install', e => {
