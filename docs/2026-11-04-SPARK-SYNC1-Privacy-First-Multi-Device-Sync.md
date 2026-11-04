@@ -206,7 +206,39 @@ Tombstones are bounded: the newest 100 deleted ids and tombstones are kept, and 
   - A new phone D joins and converges.
   - The family deletes the child. B follows, and an offline D with queued practice cannot bring it back.
   - A signed Trusted Backup is restored on a new phone E and shared. B receives it as `SITTER` with no duplicated evidence.
-  - Request bodies carry no names, words, token or key.
+  - Privacy is proven structurally (`tests/sync-privacy.mjs`, see §11.1), not by searching ciphertext for words.
+- `tests/sync1-privacy.test.mjs` (4 tests): the structural privacy validator on real engine traffic, its negative controls, and a deterministic reproduction of the CI false positive described in §11.1.
+
+### 11.1 Privacy evidence: why there is no substring scan over ciphertext (CI run 41882703763)
+GitHub Actions run 41882703763 failed at `browser-sync-check.mjs:154` with `/sync/push carries Ada`. **This was a test defect, not a leak.**
+- **Cause.** The check ran `body.includes("Ada")` (and `"hus"`) over request bodies whose record payloads are AES-256-GCM ciphertext in base64url. A fixed 3-character string occurs at a given random base64url position with probability 64⁻³ = 1/262,144. One browser run sends about 10,400 opaque characters, so each 3-letter word matched by chance in about 4 % of runs. With two such words, about 7.6 % of runs failed with no leak.
+- **Evidence.** 27 browser runs were captured and every string in every request was classified. No name or word ever appeared outside an opaque id/IV/ciphertext field. The 2-letter control `Bo` appeared 80 times inside ciphertext, IVs and ids, against about 68 expected by chance. A deterministic Node test (`sync1-privacy.test.mjs`, "CI-flake reproduction") seals a payload for a child named «Bo» with the real codec and counter IVs until the ciphertext contains `Ada`. The old scan fails on it. The new proof accepts it, and decryption shows `Ada` is nowhere in the plaintext.
+- **What the tests prove now** (`tests/sync-privacy.mjs`, used by the browser check, the Node privacy tests and test 18-19):
+  1. Every request body is a JSON object whose keys are **exactly** the permitted server-readable schema of its endpoint and operation:
+     - `status {v}`
+     - `enroll {v,mode,proof[,code]}`
+     - `push {v,gen,clientNow,records[{id,child,kind,iv,ct}]}`
+     - `pull {v,gen,cursor}`
+     - `devices {v,gen}`
+     - `admin` revoke, delete-child or reset.
+
+     No plaintext field can sit next to the ciphertext.
+  2. Every value is an opaque id, IV, ciphertext or proof, a fixed enum, an integer or a device UUID. The family code is accepted only on `enroll create` and `admin`, where the Worker must check it.
+  3. The device token appears only in the sending phone's `Authorization` header. The key is sent only as its HKDF member proof, which is checked against a derivation of the known key.
+  4. Every sent and every stored ciphertext opens with the family key through the real codec (authenticated AES-GCM bound to generation, child, kind and id, then the exact payload schema). The child's name, interests, words and meanings are present **only after** decryption.
+  5. A bit flip, or the same ciphertext presented for another child, id, kind or generation, fails authentication.
+  6. Only long secrets are excluded by substring: the token, and the key with and without separators (at least 28 characters, chance match below 2⁻¹⁶⁰). Short words are never searched for in ciphertext.
+- **Negative controls.** Each of these is rejected:
+  - the real engine patched to add `name: kid.name` to every push (Node);
+  - `name`/`interests`/`word`/`meaning`/`summary`/`transcript`/`image`/`notes`/`log` added at the top level or to a record;
+  - unencrypted base64url JSON in place of `ct` (fails decryption);
+  - the token or the key in the body;
+  - another phone's token in the header;
+  - the raw key in place of the proof;
+  - the family code on a normal request.
+
+  The browser check repeats the first two controls on the requests it actually captured.
+- **Repetition.** After the repair, `browser-sync-check.mjs` is being run 25 times in a row locally with genuine random keys, ids and IVs: 14 of 14 have passed so far. The old scan would be expected to fail about 2 of 25. The final count goes in the PR description.
 
 ## 12. Fresh review
 See §16 for findings and repairs.
