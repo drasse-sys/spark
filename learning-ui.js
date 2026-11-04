@@ -228,7 +228,12 @@ function parentHTML(){
     <p>Mikrofon er valgfri. Nettleseren kan sende tale til sin skytjeneste. Spark lagrer ikke lyd. Gjenkjent tekst må sjekkes før sending. Inntil 8 samtaler beholdes i maksimalt 30 dager. Inntil 120 lette øktoppsummeringer og kompakt ferdighetsevidens beholdes lokalt.</p>
     <button class="qb" id="clearWords">Tøm ordlisten</button><button class="qb" id="exportLearning">Last ned læringskopi</button><label for="importLearning">Gjenopprett læringskopi som nye profiler</label><input id="importLearning" type="file" accept="application/json"><button class="qb" id="recoverLearning">Gjenopprett sikkerhetskopi før migrering</button><button class="qb" id="deleteLearning">Slett all historikk for dette barnet</button></section>`;
 }
-function learningExport(){kids.forEach(k=>L.prune(k,Date.now()));return {schema:'spark-learning-export-v3',createdAt:Date.now(),kids:kids.map(k=>({name:k.name,age:k.age,interests:k.interests,notes:k.notes,log:k.log,sessions:k.sessions,learning:k.learning,readAloud:!!k.readAloud}))};}
+function learningExport(){kids.forEach(k=>L.prune(k,Date.now()));return {schema:'spark-learning-export-v3',createdAt:Date.now(),kids:kids.map(k=>({name:k.name,age:k.age,interests:k.interests,notes:k.notes,log:k.log,sessions:k.sessions,learning:k.learning,readAloud:!!k.readAloud,...(k.fork===true&&!k.sync?{origin:BACKUP_ORIGIN_LOCAL_COPY}:{})}))};}
+// SYNC1: a profile that is only a local copy of a (possibly since deleted) family child carries `origin:'local-copy'` through a
+// backup. It is a provenance label and nothing else: it holds no id, key, cursor or queue, grants no authority and cannot add
+// evidence. Restoring it only keeps the copy out of bulk sharing and behind the explicit deletion warning. A normal profile
+// carries no origin, and an unknown value is ignored (it can only ever make a profile more careful, never less).
+const BACKUP_ORIGIN_LOCAL_COPY='local-copy';
 function bindParent(){
   $('readAloudAllowed').onchange=e=>{kid().readAloud=e.target.checked;syncProfile(kid());saveKids();};
   $('clearWords').onclick=()=>{if(confirm('Tømme ordlisten for dette barnet?')){const ids=kid().learning.items.map(w=>w.id);kid().learning.items=[];if(ids.length)syncRecord(kid(),{type:'word-remove',t:Date.now(),ids});saveKids();render();}};
@@ -321,6 +326,7 @@ function validateImport(data,now=Date.now(),trusted=null){
   return data.kids.map(k=>{
     if(!k||typeof k.name!=='string'||!Number.isInteger(k.age)||k.age<4||k.age>16||k.learning?.version!==3||!Array.isArray(k.learning.items)||!Array.isArray(k.learning.sessions)||!k.learning.skills)throw Error('Ugyldig profil.');
     const clean={...blankKid(k.name.slice(0,40)),age:k.age,interests:String(k.interests||'').slice(0,120),notes:Array.isArray(k.notes)?k.notes.filter(n=>typeof n==='string').slice(-12):[],log:[],sessions:[],learning:L.empty(),readAloud:k.readAloud===true};
+    if(k.origin===BACKUP_ORIGIN_LOCAL_COPY)clean.fork=true;
     for(const [id,r] of Object.entries(k.learning.skills)){
       if(!Object.hasOwn(L.CATALOG,id)||!Array.isArray(r.ev))throw Error('Ukjent ferdighet.');
       for(const e of r.ev)if(!L.event(clean.learning,id,e))throw Error('Ugyldig læringshendelse.');

@@ -444,3 +444,51 @@ test('B3 (real bound): more than 30,000 records on one child; "Hent fjernede bar
   }
   assert.equal(snapshot(B),truth);
 });
+
+/* ---------------- cross-cutting: generations and replay ---------------- */
+test('old-generation records cannot enter the new generation (rejected at the door, or unreadable and skipped by every phone)',async()=>{
+  const {fam,A,B}=await pair('gen');
+  const old=A.engine.state(),oldKeys=await S.deriveKeys(globalThis.crypto.subtle,await S.parseKey(globalThis.crypto.subtle,old.key));
+  const r=await A.engine.reset({code:fam.code});assert.ok(r.ok);await A.sync();
+  // 1. The old generation id is refused outright.
+  const oldPush=await call(fam,'/sync/push',{v:1,gen:old.gen,clientNow:A.now(),records:[{id:A.engine.newId(),child:A.kid('Ada').id,kind:'op',iv:'A'.repeat(16),ct:'A'.repeat(22)}]},A.token());
+  assert.equal(oldPush.status,409);
+  // 2. A key holder smuggles a record sealed for the OLD generation (an inflating skill event) into the NEW one.
+  const adaId=A.kid('Ada').id,id=A.engine.newId(),t=A.now();
+  const payload={type:'skill',v:1,t,after:0,skill:'sub1',d:true,e:{s:0,ok:true,k:'cold',e:'',c:'sikker',sid:'evil',id:'evil:1',verified:true}};
+  const rec=await S.seal(globalThis.crypto.subtle,n=>globalThis.crypto.getRandomValues(new Uint8Array(n)),oldKeys.encKey,old.gen,{id,child:adaId,kind:'op'},payload);
+  const smuggled=await call(fam,'/sync/push',{v:1,gen:A.engine.state().gen,clientNow:t,records:[rec]},A.token());
+  assert.equal(smuggled.status,200,'the relay cannot read it, so it stores it');
+  assert.ok((await B.engine.join({key:r.key})).ok);
+  await B.sync();await A.sync();
+  for(const dev of [A,B]){
+    assert.equal(dev.kid('Ada').learning.skills.sub1,undefined,'no phone applies it');
+    assert.ok(dev.engine.state().undecryptable>=1,'counted as unreadable');
+  }
+  assert.equal(snapshot(A),snapshot(B));
+});
+test('replay inflates nothing: re-downloading everything, even with the recent-id window emptied, leaves evidence, mastery and word credit unchanged',async()=>{
+  const small=clientRealm(cut('seen:2000','seen:40'));
+  const {A,B}=await longHistory({reviews:240,realm:small,name:'rp'});
+  const facts=d=>JSON.stringify(canon(d.kids.map(k=>({totals:k.learning.totals,skills:Object.entries(k.learning.skills).map(([id,r])=>[id,r.box,r.due,r.ev.map(e=>e.id),r.independentAt,r.retainedAt]),words:k.learning.items.map(w=>[w.id,w.box,w.due,w.lastAt,w.ev.map(e=>[e.t,e.ok,e.delayed])])}))));
+  const before=facts(B),snap=snapshot(B);
+  for(let i=0;i<3;i++){
+    for(const k of B.kids)if(k.sync)k.sync.seen=[];                 // the dedupe window is empty: only the watermark is left
+    B.state=JSON.stringify({...JSON.parse(B.state),cursor:0});     // the whole family log is delivered again
+    assert.deepEqual(await B.sync(),{ok:true});
+    assert.equal(facts(B),before,'pass '+i);assert.equal(snapshot(B),snap);
+  }
+  assert.equal(facts(B),facts(A));
+});
+test('an own record that the Worker stored but whose acknowledgement never arrived is applied once when the download delivers it first',async()=>{
+  const {A,B}=await pair('own');
+  const ada=B.kid('Ada'),word=B.addWord(ada,'katt','cat');B.reviewWord(ada,word.id,{ok:true});
+  // The push is stored, but the phone is told "retry" for every record, so the round goes on to download with the queue intact.
+  B.intercept=async(path,body,go)=>{const r=await go();if(path==='/sync/push'){B.intercept=null;return {...r,data:{...r.data,results:r.data.results.map(x=>({id:x.id,status:'retry'}))}};}return r;};
+  const queued=ada.sync.pending.length;assert.ok(queued>=2);
+  assert.deepEqual(await B.sync(),{ok:true});
+  assert.equal(ada.sync.pending.length,0,'the download acknowledged them');
+  assert.equal(ada.learning.items[0].ev.length,1,'applied once');
+  await A.sync();assert.equal(snapshot(A),snapshot(B));
+  assert.deepEqual(await B.sync(),{ok:true});assert.equal(ada.learning.items[0].ev.length,1);
+});

@@ -416,6 +416,9 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
             target=d.newKid();target.id=rec.child;target.sync=emptySync();d.addKid(target);
           }else if(!target.sync)continue;// an unshared local profile never adopts family records
           if(incorporated(target.sync,rec))continue;
+          // This phone's own record, stored by the Worker, whose acknowledgement never arrived: the download is the acknowledgement.
+          // (Left in the queue as well it would be folded twice, once from the log and once as unsent.)
+          const own=target.sync.pending.findIndex(o=>o.id===rec.id);if(own>=0)target.sync.pending.splice(own,1);
           target.sync.log.push({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p});markSeen(target.sync,rec.id);changed.add(target);
         }
         // A child the Worker reports deleted, without a tombstone this phone could verify, stays here as a local copy.

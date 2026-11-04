@@ -148,11 +148,15 @@ function bindSync(){
   });
   if($('syncDevices'))$('syncDevices').onclick=ev=>syncGuard(ev.currentTarget,async()=>{
     const r=await e.devices();if(!r.ok){alert(syncError(r));return;}
-    syncDevicesView=r.devices.map(x=>`<p>${x.self?'Denne telefonen':'Enhet '+esc(x.device.slice(0,4))} · lagt til ${esc(new Date(x.enrolledAt).toLocaleDateString('nb-NO'))} · sist sett ${esc(new Date(x.seenDay).toLocaleDateString('nb-NO'))}${x.status==='revoked'?' · fjernet':x.self?'':` <button class="qb" data-revoke="${esc(x.device)}">Fjern enheten</button>`}</p>`).join('');
+    syncDevicesView=r.devices.map(x=>`<p>${x.self?'Denne telefonen':'Enhet '+esc(x.device.slice(0,4))} · lagt til ${esc(new Date(x.enrolledAt).toLocaleDateString('nb-NO'))} · sist sett ${esc(new Date(x.seenDay).toLocaleDateString('nb-NO'))}${x.status==='revoked'?` · fjernet <button class="qb" data-reauth="${esc(x.device)}">Gi tilgang igjen</button>`:(x.status==='inactive'?' · må skrive inn den nye nøkkelen':'')+(x.self?'':` <button class="qb" data-revoke="${esc(x.device)}">Fjern enheten</button>`)}</p>`).join('');
   });
   main.querySelectorAll('[data-revoke]').forEach(b=>b.onclick=ev=>syncGuard(ev.currentTarget,async()=>{
     if(!confirm('Fjerne denne enheten fra synkroniseringen? Den kan ikke bli med igjen uten å kobles til på nytt med familiekoden.'))return;
     const r=await e.revoke({code:$('syncAdminCode').value,device:b.dataset.revoke});if(!r.ok){alert(syncError(r));return;}syncDevicesView='';
+  }));
+  main.querySelectorAll('[data-reauth]').forEach(b=>b.onclick=ev=>syncGuard(ev.currentTarget,async()=>{
+    if(!confirm('Gi denne enheten tilgang igjen? Den må fortsatt ha synkroniseringsnøkkelen for å bli med.'))return;
+    const r=await e.reauthorize({code:$('syncAdminCode').value,device:b.dataset.reauth});if(!r.ok){alert(syncError(r));return;}syncDevicesView='';
   }));
   if($('syncReset'))$('syncReset').onclick=ev=>syncGuard(ev.currentTarget,async()=>{
     if(!confirm('Starte synkroniseringen på nytt med en ny nøkkel? Alt familien har lagret på serveren slettes. Data på telefonene beholdes, og de andre telefonene må bli med igjen med den nye nøkkelen.'))return;

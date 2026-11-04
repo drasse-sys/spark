@@ -61,11 +61,11 @@ export function checkSyncRequest({path,method='POST',body,auth},ctx){
     case '/sync/pull':keysExactly(b,['v','gen','cursor'],where);match(b.gen,RX.id,where+'.gen');int(b.cursor,where+'.cursor');break;
     case '/sync/devices':keysExactly(b,['v','gen'],where);match(b.gen,RX.id,where+'.gen');break;
     case '/sync/admin':{
-      const shape={revoke:['v','gen','op','code','device'],'delete-child':['v','gen','op','code','child','record'],reset:['v','op','code','proof']}[b.op];
-      assert.ok(shape,where+'.op must be revoke, delete-child or reset');
+      const shape={revoke:['v','gen','op','code','device'],reauthorize:['v','op','code','device'],'delete-child':['v','gen','op','code','child','record'],reset:['v','op','code','proof']}[b.op];
+      assert.ok(shape,where+'.op must be revoke, reauthorize, delete-child or reset');
       keysExactly(b,shape,where+' ('+b.op+')');code(b.code);
-      if(b.op==='reset')proof(b.proof);else match(b.gen,RX.id,where+'.gen');
-      if(b.op==='revoke')match(b.device,RX.device,where+'.device');
+      if(b.op==='reset')proof(b.proof);else if(b.op!=='reauthorize')match(b.gen,RX.id,where+'.gen');
+      if(b.op==='revoke'||b.op==='reauthorize')match(b.device,RX.device,where+'.device');
       if(b.op==='delete-child'){
         match(b.child,RX.id,where+'.child');assert.ok(isObj(b.record),where+'.record');keysExactly(b.record,['id','iv','ct'],where+'.record');
         const rec={id:b.record.id,child:b.child,kind:'tombstone',iv:b.record.iv,ct:b.record.ct};record(rec,['tombstone'],where+'.record');sealed.push({gen:b.gen,rec});
