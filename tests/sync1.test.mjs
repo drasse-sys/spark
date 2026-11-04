@@ -4,6 +4,7 @@ import {webcrypto} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {localD1,world,family,device,snapshot,reference,canon,prng,blankKid,request,clientRealm,cut,L,S,DAY} from './sync-helpers.mjs';
 import {backend,environment,root} from './helpers.mjs';
+import {checkSyncRequest,openAll,RX} from './sync-privacy.mjs';
 
 /* SYNC1 multi-device sync: real Worker code, real local D1 (workerd), real client engine. Fixture secrets only. */
 const {db,dispose}=await localD1();
@@ -365,12 +366,24 @@ test('18-19: normal sync payloads carry no transcript, image, notes, log, exampl
   }
   // Stored rows and request bodies hold neither child names nor credentials (the device token travels only in the header).
   const db1=JSON.stringify(rows)+JSON.stringify((await db.prepare('SELECT * FROM sync_families').all()).results)+JSON.stringify((await db.prepare('SELECT * FROM sync_devices').all()).results);
-  for(const m of ['Ada','hus',...markers,...secrets,keys.proof])assert.ok(!db1.includes(m),m+' stored by the Worker');
-  for(const {path,body} of [...A.sent,...B.sent]){
-    const text=JSON.stringify(body);
-    for(const m of ['Ada',...markers,...secrets.filter(s=>s!==fam.env.FAMILY_CODE)])assert.ok(!text.includes(m),path+' carries '+m);
-    if(path!=='/sync/enroll'||body.mode!=='create')assert.ok(!text.includes(fam.env.FAMILY_CODE),path);
+  // Long markers and secrets only (>= 8 characters, or containing characters outside base64url): a chance match inside
+  // random ciphertext is negligible. Short words ("Ada", "hus") are excluded structurally instead (tests/sync-privacy.mjs).
+  for(const m of [...markers,...secrets,keys.proof])assert.ok(!db1.includes(m),m+' stored by the Worker');
+  const RECORD_COLUMNS=['family_id','seq','record_id','child_id','kind','received_at','clock_ok','iv','ct'];
+  for(const r of rows){
+    assert.deepEqual(Object.keys(r).sort(),RECORD_COLUMNS.slice().sort());
+    for(const c of ['record_id','child_id'])assert.match(r[c],RX.id);assert.match(r.iv,RX.iv);assert.match(r.ct,RX.ct);assert.ok(['base','op','tombstone'].includes(r.kind));
+    for(const c of ['seq','received_at','clock_ok'])assert.ok(Number.isSafeInteger(r[c]));
   }
+  const sealed=[];
+  for(const dev of [A,B]){
+    const ctx={token:dev.token(),familyCode:fam.env.FAMILY_CODE,proofs:new Set([keys.proof]),secrets:[A.token(),B.token(),c.key,c.key.replace(/-/g,'')]};
+    for(const {path,body} of dev.sent){
+      const text=JSON.stringify(body);sealed.push(...checkSyncRequest({path,body:text,auth:'Bearer '+dev.token()},ctx));
+      for(const m of markers)assert.ok(!text.includes(m),path+' carries '+m);
+    }
+  }
+  assert.ok((await openAll(S,c.key,sealed)).some(o=>o.p.type==='base'&&o.p.profile.name==='Ada'),'the name exists only inside authenticated ciphertext');
   // Responses never echo the device token.
   const resp=await call(fam,'/sync/pull',{v:1,gen:st.gen,cursor:0},A.token());assert.ok(!resp.text.includes(A.token())&&!resp.text.includes(A.token().split('.')[1]));
   // Local-only fields stay on A.

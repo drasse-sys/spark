@@ -9,7 +9,8 @@ import {fileURLToPath} from 'node:url';
 import {webcrypto} from 'node:crypto';
 import assert from 'node:assert/strict';
 import {backend,environment} from './helpers.mjs';
-import {localD1} from './sync-helpers.mjs';
+import {localD1,S} from './sync-helpers.mjs';
+import {checkSyncRequest,openAll,assertTamperFails,proofOf} from './sync-privacy.mjs';
 const require=createRequire(process.env.SPARK_TEST_MODULE_ROOT||import.meta.url);
 const {chromium}=require('playwright');
 const root=fileURLToPath(new URL('../',import.meta.url));
@@ -35,7 +36,7 @@ try{
     await page.route(SERVER+'/**',async route=>{
       const req=route.request(),path=new URL(req.url()).pathname;
       if(p.offline)return route.abort('internetdisconnected');
-      if(req.method()!=='OPTIONS'&&path.startsWith('/sync/'))bodies.push({label,path,body:req.postData()||'',auth:req.headers().authorization||''});
+      if(req.method()!=='OPTIONS'&&path.startsWith('/sync/'))bodies.push({label,path,method:req.method(),body:req.postData()||'',auth:req.headers().authorization||''});
       const r=await worker.worker.fetch(new Request(req.url(),{method:req.method(),headers:{...req.headers(),origin,'cf-connecting-ip':'192.0.2.7'},body:['GET','OPTIONS'].includes(req.method())?undefined:req.postData()}),env);
       return route.fulfill({status:r.status,headers:Object.fromEntries(r.headers),body:await r.text()});
     });
@@ -149,13 +150,37 @@ try{
   assert.equal(await sync(E),'{"ok":true}');assert.equal(await sync(B),'{"ok":true}');
   assert.equal(await B.page.evaluate(()=>kids.find(k=>k.name==='Bo'&&k.sync).learning.skills.add1.ev.length),3,'no duplicated evidence');
 
-  // Request bodies: ciphertext and ids only. No child name, word, token or key; the token travels only in the header.
-  for(const b of bodies){
-    for(const m of ['Ada','"Bo"','hus','Ola så',key,key.replace(/-/g,''),A.token,B.token])assert.ok(!b.body.includes(m),b.path+' carries '+m);
-    assert.ok(b.auth.startsWith('Bearer '));
-  }
+  // 11. Privacy, proven structurally (tests/sync-privacy.mjs), never by scanning random ciphertext for short words: every
+  // request has exactly its endpoint's server-readable schema (opaque ids/IV/ciphertext, enums, integers, the parent's
+  // family code only where it must be proven), the token only in its own phone's Authorization header, the key never
+  // sent (only its HKDF proof), and every ciphertext opens with the family key under authenticated decryption.
+  const phones={A,B,C,D,E},secrets=[key,key.replace(/-/g,''),...Object.values(phones).map(p=>p.token)];
+  const proofs=new Set([await proofOf(S,key)]),privacy=q=>checkSyncRequest(q,{token:phones[q.label].token,familyCode:env.FAMILY_CODE,proofs,secrets});
+  const sealed=bodies.flatMap(privacy);
+  assert.deepEqual([...new Set(bodies.map(q=>q.path))].sort(),['/sync/admin','/sync/devices','/sync/enroll','/sync/pull','/sync/push']);
+  const opened=await openAll(S,key,sealed);
+  assert.ok(opened.length===sealed.length&&opened.length>=10);
+  // The child content is really there, but only after authenticated decryption with the family key.
+  const plain=opened.map(o=>o.p);
+  assert.ok(plain.some(p=>p.type==='base'&&p.profile.name==='Ada'&&p.learning.items.some(w=>w.word==='hus'&&w.meaning==='et sted å bo'&&w.sentence==='')));
+  assert.ok(plain.some(p=>p.type==='base'&&p.profile.name==='Bo'));
+  assert.ok(plain.some(p=>p.type==='word-add'&&p.word.word==='tre')&&plain.some(p=>p.type==='skill')&&plain.some(p=>p.type==='session')&&plain.some(p=>p.type==='tombstone'&&p.child===adaId));
+  assert.ok(!JSON.stringify(plain).includes('Ola så'),'the example sentence never syncs, even encrypted');
+  // Tampering (bit flip, or the ciphertext presented for another child, id, kind or generation) fails authentication.
+  for(const kind of ['base','op','tombstone'])await assertTamperFails(S,key,opened.find(o=>o.rec.kind===kind),S.b64url(new Uint8Array(16).fill(7)));
+  // What the Worker stores is the same ciphertext: every D1 row opens with the family key, Bo's base among them.
+  const fam=await db.prepare('SELECT gen FROM sync_families').first(),stored=(await db.prepare('SELECT record_id AS id, child_id AS child, kind, iv, ct FROM sync_records ORDER BY seq').all()).results;
+  const storedPlain=(await openAll(S,key,stored.map(rec=>({gen:fam.gen,rec})))).map(o=>o.p);
+  assert.ok(storedPlain.some(p=>p.type==='base'&&p.profile.name==='Bo'));
+  // Negative controls on real captured requests: a plaintext name beside the ciphertext, the token in the body, and
+  // a ciphertext replaced by unencrypted (base64url) JSON are each rejected.
+  const push=bodies.find(q=>q.path==='/sync/push'),edit=f=>{const b=JSON.parse(push.body);f(b);return {...push,body:JSON.stringify(b)};};
+  assert.throws(()=>privacy(edit(b=>{b.name='Ada';})),/server-readable properties must be exactly/);
+  assert.throws(()=>privacy(edit(b=>{b.records[0].name='Ada';})),/server-readable properties must be exactly/);
+  assert.throws(()=>privacy(edit(b=>{b.token=A.token;})),/exactly|credential/);
+  await assert.rejects(openAll(S,key,privacy(edit(b=>{b.records[0].ct=S.b64url(new TextEncoder().encode(JSON.stringify({type:'profile',v:1,t:1,after:0,profile:{name:'Ada',age:9,interests:'',readAloud:false}})));}))),/authenticated decryption/);
   await B.page.evaluate(()=>{view='setup';render();});await B.page.locator('#syncSection').scrollIntoViewIfNeeded();await B.page.screenshot({path:resolve(artifacts,'sync1-two-phones.png')});
   assert.deepEqual(errors,[]);
-  console.log(JSON.stringify({result:'PASS',phones:5,checks:['UI create on phone with existing child','UI join with typed key (case/space tolerant)','starter profile replaced','both offline: real practice + word list on each phone','reconnect A via online event, then B, then A: converged','reload both: still converged; extra round idempotent','stale phone C: newer evidence kept everywhere','revoke C via device list + family code; C keeps local data','new phone D joins and converges','family delete: B follows; offline D cannot resurrect','Trusted Backup → restore on E → share → B: SITTER kept, no duplicate evidence','request bodies carry no names, words, token or key'],syncRequests:bodies.length,pageErrors:errors,screenshots:['tests/artifacts/sync1-settings.png','tests/artifacts/sync1-two-phones.png']}));
+  console.log(JSON.stringify({result:'PASS',phones:5,checks:['UI create on phone with existing child','UI join with typed key (case/space tolerant)','starter profile replaced','both offline: real practice + word list on each phone','reconnect A via online event, then B, then A: converged','reload both: still converged; extra round idempotent','stale phone C: newer evidence kept everywhere','revoke C via device list + family code; C keeps local data','new phone D joins and converges','family delete: B follows; offline D cannot resurrect','Trusted Backup → restore on E → share → B: SITTER kept, no duplicate evidence','privacy: schema-exact request bodies, token only in header, key only as HKDF proof, every ciphertext (sent and stored) opens with the family key, tampering fails, plaintext-field negative controls rejected'],syncRequests:bodies.length,pageErrors:errors,screenshots:['tests/artifacts/sync1-settings.png','tests/artifacts/sync1-two-phones.png']}));
   for(const p of [A,B,C,D,E])await p.context.close();
 }finally{await browser?.close();await new Promise(r=>server.close(r));await dispose();}
