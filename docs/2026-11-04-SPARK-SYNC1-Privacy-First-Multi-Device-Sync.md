@@ -155,8 +155,8 @@ Every property below is covered by tests. Idempotent: replay is ignored and a re
 | Delete child from **family** | family code | The Worker deletes the child's records, marks the id `deleted` permanently, and stores a tombstone encrypted by the requesting phone. Phones that verify the tombstone delete the child. A server-reported deletion that cannot be verified leaves a local copy. | Its queued records are refused (`child_deleted`). The tombstone removes the child. Nothing comes back. |
 | Clear transcript / history locally | local | Unchanged. Transcripts are never synced. | n/a |
 | Delete synced learning data (keep child) | family code | "Slett all historikk" on a shared child: delete from family, then share a fresh, empty child with the same profile under a new id. | As above: the old id is a tombstone. |
-| Revoke a device | family code | Registry row → `revoked` (permanent for that id). | It gets 403 and keeps local data. Re-enrolling the same id is refused. |
-| Reset family / rotate key | family code | Always possible: it is the way out of a lost key, a full family or a corrupt stored key. The resetting phone first runs a sync round. Only if that round downloaded completely in the current generation (so every deletion it can receive is applied) does it share its children again automatically. Otherwise they stay as local copies. The Worker then deletes the family's records, active children and active enrolments, and starts a new generation. Kept: revocations, deleted child ids, and tombstones of every generation. | It gets 409 and must enter the new key. On re-joining it receives the old tombstones and verifies them with its previous key: children deleted before the reset are removed. Other shared children become local copies, so nothing is lost. **Local copies are never shared in bulk.** They are shared only one at a time, after a warning that the child may have been deleted from the family. A child deleted in a *later* generation than the phone knew cannot be verified by that phone. The rule above is what keeps it from coming back silently. |
+| Revoke a device | family code | Registry row → `revoked`. This is permanent for that id, with one exception: a revoked phone whose user types the family code can run a reset and becomes active again (review-3 F8). The family code also allows pairing a new phone, so this is no escalation. A reset clears the rows of active devices, so a lost phone that was never revoked is no longer listed afterwards (F7). | It gets 403 and keeps local data. Re-enrolling the same id is refused. |
+| Reset family / rotate key | family code | Always possible: it is the way out of a lost key, a full family or a corrupt stored key. The resetting phone first runs a sync round. It shares its children again automatically only if two things hold. First, that round downloaded completely, to the Worker's head, in the current generation, not stopped by the page budget. Second, the Worker's reset reply confirms (`prev`) that this reset replaced exactly that generation, so no other parent phone reset in between (review-3 F1/F2). Otherwise they stay as local copies. The Worker then deletes the family's records, active children and active enrolments, and starts a new generation. Kept: revocations, deleted child ids, and tombstones of every generation. | It gets 409 and must enter the new key. On re-joining it receives the old tombstones and verifies them with its previous key: children deleted before the reset are removed. Other shared children become local copies, so nothing is lost. **Local copies are never shared in bulk.** They are shared only one at a time, after a warning that the child may have been deleted from the family. A child deleted in a *later* generation than the phone knew cannot be verified by that phone. The rule above is what keeps it from coming back silently. |
 
 Tombstones are bounded: the newest 100 deleted ids and tombstones are kept, and they do not count toward the 20-child quota. A phone that missed more than 100 deletions and still holds an older one gets `child_unknown` for it, and keeps it as a local copy that is never shared automatically.
 
@@ -195,7 +195,7 @@ Tombstones are bounded: the newest 100 deleted ids and tombstones are kept, and 
 | Not paired with the build's Worker | Sync is off and the status explains why. |
 
 ## 11. Tests and evidence
-- `tests/sync1.test.mjs` (36 tests, 10 of them review regressions): the real Worker code on a **real local D1** (workerd through `getPlatformProxy`, `sync-lab` environment, in memory), with real client engines as phones. It covers the 20 required cases, migration from old local-only state, checkpoint equivalence, reset and re-pair, removal from one phone, the feature gate, auth before database access, rate limits, the key codec and associated-data binding. A seeded randomized test (6 seeds × 70 operations on 3 phones, with offline toggles, clock skews and time jumps) checks that every phone's state equals a fresh replay of everything stored, before and after reload. **3 negative controls** each remove one defence (the seen-id check, the Worker clock flag, family scoping in pull) and show that the matching attack succeeds.
+- `tests/sync1.test.mjs` (38 tests, 12 of them review regressions): the real Worker code on a **real local D1** (workerd through `getPlatformProxy`, `sync-lab` environment, in memory), with real client engines as phones. It covers the 20 required cases, migration from old local-only state, checkpoint equivalence, reset and re-pair, removal from one phone, the feature gate, auth before database access, rate limits, the key codec and associated-data binding. A seeded randomized test (6 seeds × 70 operations on 3 phones, with offline toggles, clock skews and time jumps) checks that every phone's state equals a fresh replay of everything stored, before and after reload. **3 negative controls** each remove one defence (the seen-id check, the Worker clock flag, family scoping in pull) and show that the matching attack succeeds.
 - `tests/sync1-frontend.test.mjs` (9 tests, jsdom; includes the review regressions for the settings form and missing sync scripts): default OFF for existing users (no UI, no request, no sync data); the build Worker is the only sync target; backups contain no sync data or key; malformed stored sync data keeps the child; index-safe removal; archive rollback; interaction timestamps stay local.
 - `tests/browser-sync-check.mjs` (real Chromium, 5 independent browser profiles, the real Worker on real local D1):
   - A starts sync in the UI on a phone with an existing child. B joins with the typed key.
@@ -238,7 +238,7 @@ GitHub Actions run 41882703763 failed at `browser-sync-check.mjs:154` with `/syn
   - the family code on a normal request.
 
   The browser check repeats the first two controls on the requests it actually captured.
-- **Repetition.** After the repair, `browser-sync-check.mjs` is being run 25 times in a row locally with genuine random keys, ids and IVs: 14 of 14 have passed so far. The old scan would be expected to fail about 2 of 25. The final count goes in the PR description.
+- **Repetition.** After the repair, `browser-sync-check.mjs` passed **25 of 25** consecutive local runs with genuine random keys, ids and IVs. The old scan would be expected to fail about 2 of 25. GitHub Actions run 41890021287 (head `f7e6f85`) passed every step, including this check.
 
 ## 12. Fresh review
 See §16 for findings and repairs.
@@ -291,6 +291,32 @@ The review's doc corrections are applied: metadata list, padding, Worker re-orde
 | Revoked devices could push active devices out of the 50-row list. | Low | Active devices are listed first. |
 | A round could finish after settings opened, leaving a stale form. | Low | A finished round re-draws the open settings form when children changed. |
 
+**Third independent review (reset / deletion / re-share / stale-device boundary), of `f7e6f85`.** This was a fresh agent that saw no earlier conclusions. It wrote invariants first (generation, deletion, re-share, quota, reset liveness, revocation, clock) and executed 24+ scenarios against the real Worker, local D1 and client engines.
+- The earlier repairs hold in sequential flows:
+  - HIGH-1 (a deleted child returns through a re-share);
+  - HIGH-2 (reset with a full quota, and deleted rows outside the quota);
+  - the far-future word-review MEDIUM.
+- Also verified:
+  - revoked devices stay revoked across a reset, and on every route;
+  - old-generation records and tombstones replayed after a reset are refused or fail to open;
+  - a corrupt stored key still allows a reset without re-sharing.
+
+| # | Severity | Finding | Outcome |
+|---|---|---|---|
+| F1 | Medium | A concurrent reset by a second parent phone, landing between a phone's pre-reset download and its reset request, followed by a deletion in that generation: the first phone re-shared the deleted child. | **Repaired.** The Worker returns `prev`, the generation the reset replaced, read in the same D1 batch. A phone re-shares automatically only if `prev` is exactly the generation it has just downloaded. Otherwise its children stay local copies. Regression `review-3 F1`, which fails without the repair. |
+| F2 | Low | A download stopped by the 40-page budget still counted as "just downloaded". With a deletion beyond the budget whose tombstone was no longer among the newest 100, the child was re-shared. | **Repaired** (same `fresh` rule as F1). Fresh now also requires that the last round reached the head. Regression `review-3 F2`, which fails without the repair. |
+| F3 | Low | Delay credit survives the merge for clock errors inside the Worker's ±24 h acceptance window, or for a backwards step on an offline phone with no witness. | Residual. See §17 and the decision matrix. |
+| F4 | Low | A lost base acknowledgement, retried after more than 100 newer deletions (row cleanup), is accepted as a new active "ghost" child that no phone shows. It cannot be removed through the UI until a reset. | Residual (needs more than 100 deletions). Possible fix: refuse a base whose id has a tombstone record in the generation. |
+| F5 | Low | A lost reset reply followed by a retry turns every child into a warned local copy. | Residual (safe direction). |
+| F6 | Low | Kids storage fails after the state is saved on reset: after a reload, a child shows as "shared" but never syncs until the next reset or re-pair. | Residual (no resurrection). |
+| F7 | Low | A reset removes the rows of active devices, so a lost phone can no longer be listed or revoked afterwards. Its old key and token are useless; it would need the new key. | Residual. See §17. |
+| F8 | Doc | A revoked device that knows the family code can run a reset and becomes active again. Pairing needs the same code, so this is no escalation. | Documented here and in §8. |
+| F9 | Low | Behind cleanup (more than 100 deletions), a stale phone keeps the deleted child as a local copy, never automatically shared. | Residual (safe direction). |
+| F10 | Low | Learning export and import drop the local-copy marker. An imported copy of a deleted child is then offered in the bulk share prompt without the deletion warning. | Residual. Needs explicit parent action and an old backup. |
+| F11 | Low/Doc | A phone that never syncs, with a clock 20 days fast, pins a word locally until its next sync. Each reset adds one local copy per child on phones that did not reset. | Documented. |
+
+**Narrow confirmation review of the F1/F2 repair (`f34ad29`)** by a separate fresh agent: see the PR description for its verdict.
+
 ## 17. Exact blockers before production
 1. **Product decisions:**
    - (a) whether tutor notes (`notes`) and the parent teaching log (`log`) should sync. Both are provider-generated text; V1 keeps them local.
@@ -306,7 +332,18 @@ The review's doc corrections are applied: metadata list, padding, Worker re-orde
 3. **Key rotation in place.** V1 rotation is a family reset (server data is deleted and phones re-share). Re-encryption without a reset is not implemented.
 4. **Withheld-record detection on new phones.** It would need client-signed heads.
 5. A real-phone trial: two phones, airplane mode, and storage pressure on iOS Safari (where localStorage is not guaranteed under pressure).
-6. **The last repairs (§16, second table) were verified by tests only.** The reset and generation paths were fixed twice. Before any merge they should get one more independent review.
+6. The reset and generation paths have now had a third independent review (§16). Its LOW residuals (F3–F11) are accepted for a lab trial, not for production. F4, F7 and F10 should be fixed before production.
+7. **Clock credit (F3).** The Worker accepts a phone clock within ±24 h as "agreeing" for delay credit, so a phone up to a day fast can earn early delayed-review credit that survives the merge. A tighter bound for credit (minutes) than for ordering is a small change, but it is a product trade-off for phones that are legitimately offline.
+
+### 17.1 Product decision matrix (V1 behaviour kept; not decided here)
+| Decision | V1 behaviour today | Options | Consequence to weigh |
+|---|---|---|---|
+| Tutor notes / teaching log sync | Local only (provider-generated text) | Keep local; sync encrypted as new op kinds | More family insight, against more sensitive content on more devices and larger records |
+| Merging duplicate pre-sync profiles | Never automatic; separate children; the parent removes one | Keep; guided merge (pick one base, replay evidence) | Duplicate evidence and mastery inflation if done wrong; needs its own design |
+| Key entry: QR or typed | Typed 28-character key (checksum, tolerant of confusables) | Keep typed; add QR (needs a camera/scanner path) | UX friction against new code and camera permission |
+| Sync revocation also revokes chat | No; chat is revoked only through `REVOKE_BEFORE` | Keep separate; tie the device token's chat access to the sync revocation | One action for a lost phone, against coupling two independent features |
+| Clock tolerance for delay credit (F3) | ±24 h (same as ordering) | Keep; separate tighter credit bound | Fewer false credits, against lost credit for phones with drifting clocks |
+| Revocability after reset (F7) | Active device rows are cleared on reset | Keep; keep them as `inactive` | A lost phone stays listable and revocable, against a growing device list |
 
 ## 18. Recommended phases after this candidate
 1. Product decisions in §17.1; real-phone trial in `sync-lab`.
