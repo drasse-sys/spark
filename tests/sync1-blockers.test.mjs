@@ -84,8 +84,9 @@ test('B1: delete wins the race; the reset that follows starts a clean generation
   assert.equal(A.kid('Ada'),undefined,'A\'s copy is removed by the verified tombstone, not re-shared');
   assert.equal(B.kid('Ada'),undefined);
   const c=await counts(fam);consistent(c);
-  assert.equal(c.active,0);assert.equal(c.deleted,1);
-  assert.equal((await one(fam,'SELECT status FROM sync_children WHERE family_id=?1 AND child_id=?2',adaId)).status,'deleted');
+  assert.equal(c.active,0);assert.equal(c.deleted,0,'deleted ids belong to the old generation; the new one starts clean');
+  assert.equal(c.tombstones,1,'the tombstone survives, so phones that re-join verify the deletion and drop their copy');
+  assert.equal((await rows(fam,'SELECT status FROM sync_children WHERE family_id=?1 AND child_id=?2',adaId)).length,0);
 });
 test('B1: delete-child is idempotent (same request replayed, or retried with a new record id after a lost reply)',async()=>{
   const {fam,A,B}=await pair('b1i');
@@ -315,7 +316,7 @@ test('B4: the registry is bounded (inactive rows to the newest 50, expired revoc
 // A family with children Ada and Bo, and a long history on Ada: one word reviewed `reviews` times, 40 reviews per round,
 // one day per round (so old records become final and are folded into checkpoints, as in real use).
 const cold=(dev,kid,i)=>{const sid='cs'+i,input={id:sid+':t1:'+i,t:dev.now(),sid,s:0,ok:true,verified:true,k:'cold',e:'',c:''};const v=L.event(kid.learning,'add1',input);if(v)dev.engine.enqueue(kid,S.skillOp('add1',input,v));return v;};
-async function longHistory({reviews,realm,name,stepDays=5}){
+async function longHistory({reviews,realm,name,stepDays=5,extras=false}){
   const clock=world(),fam=family(db,clock,'b3'+name+(n++));
   const A=await device(fam,clock),B=await device(fam,clock,realm?{realm}:{});
   const ada=A.kids[0];ada.name='Ada';ada.age=9;A.practice(ada,'add1');
@@ -323,6 +324,13 @@ async function longHistory({reviews,realm,name,stepDays=5}){
   const c=await A.engine.create({code:fam.code});assert.ok(c.ok);
   assert.equal(A.engine.shareAll(),2);A.saveKids();assert.deepEqual(await A.sync(),{ok:true});
   assert.ok((await B.engine.join({key:c.key})).ok);assert.deepEqual(await B.sync(),{ok:true});
+  if(extras){                                           // early operations of every kind, so they are old when replay is tried
+    const hund=A.addWord(ada,'hund','dog');A.reviewWord(ada,hund.id,{ok:true});A.clearWords(ada);
+    A.archive(ada,{id:'early-1'});A.archive(ada,{id:'early-2'});
+    A.profile(ada,{interests:'fotball'});
+    A.engine.enqueue(ada,{type:'helped',t:A.now(),skill:'add1',value:'Tallinje'});ada.learning.skills.add1.helped='Tallinje';A.saveKids();
+    clock.advance(DAY);
+  }
   const word=A.addWord(ada,'katt','cat');
   let done=0;
   while(done<reviews){
@@ -351,8 +359,8 @@ test('B3 (reproducer, lowered retention bound): with more records than the dedup
   assert.equal(snapshot(B),snapshot(A),'exactly the family state: no old record applied twice');
   assert.equal(adaView(B),adaView(A));
 });
-test('B3 (negative control): without the watermark the same scenario diverges',async()=>{
-  const broken=clientRealm(s=>cut('rec.seq<=(sync.wm||0)||','')(cut('seen:10000','seen:40')(s)));
+test('B3 (negative control): without the watermark (and the operation identity) the same scenario diverges',async()=>{
+  const broken=clientRealm(s=>cut('if(!firstUse(st,p))return st;','')(cut('rec.seq<=(sync.wm||0)||','')(cut('seen:10000','seen:40')(s))));
   const {A,B}=await longHistory({reviews:240,realm:broken,name:'neg'});
   B.engine.hide(B.kid('Bo'));B.engine.unhide();await B.sync();
   assert.notEqual(snapshot(B),snapshot(A),'the defence is what makes the difference');
@@ -391,11 +399,11 @@ async function inject(fam,dev,childId,count,{spanDays=300}={}){
   let bytes=0,chunk=[],last=0;
   const flush=async()=>{if(!chunk.length)return;await db.prepare("INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, json_extract(value,'$.s'), json_extract(value,'$.id'), ?2, 'op', json_extract(value,'$.at'), 1, json_extract(value,'$.iv'), json_extract(value,'$.ct') FROM json_each(?3)").bind(fid,childId,JSON.stringify(chunk)).run();chunk=[];};
   for(let i=0;i<count;i++){
-    const at=t0+(i+1)*step,after=i?t0+i*step:t0;let payload;
-    if(i===0)payload={type:'word-add',v:1,t:at,after,word};
-    else if(i%150===0)payload={type:'skill',v:1,t:at,after,skill:'add1',d:true,e:{s:0,ok:true,k:'cold',e:'',c:'',sid:'cs'+i,id:'cs'+i+':t1',verified:true}};
-    else if(i%60===0)payload={type:'session',v:1,t:at,after,session:{id:'sess'+i,startedAt:at-60000,endedAt:at,activeMs:60000,mode:'matte',events:[],reflection:'',interventions:0,interactions:[]}};
-    else payload={type:'word-review',v:1,t:at,after,wordId:word.id,s:0,ok:i%3!==0,c:'',d:true};
+    const at=t0+(i+1)*step,after=i?t0+i*step:t0,o={s:'InjectStrm01',n:i+1};let payload;
+    if(i===0)payload={type:'word-add',v:2,o,t:at,after,word};
+    else if(i%150===0)payload={type:'skill',v:2,o,t:at,after,skill:'add1',d:true,e:{s:0,ok:true,k:'cold',e:'',c:'',sid:'cs'+i,id:'cs'+i+':t1',verified:true}};
+    else if(i%60===0)payload={type:'session',v:2,o,t:at,after,session:{id:'sess'+i,startedAt:at-60000,endedAt:at,activeMs:60000,mode:'matte',events:[],reflection:'',interventions:0,interactions:[]}};
+    else payload={type:'word-review',v:2,o,t:at,after,wordId:word.id,s:0,ok:i%3!==0,c:'',d:true};
     const id=S.b64url(rand(16)),rec=await S.seal(globalThis.crypto.subtle,rand,k.encKey,st.gen,{id,child:childId,kind:'op'},payload);
     bytes+=rec.ct.length;last=at;
     chunk.push({s:head+i+1,id,at,iv:rec.iv,ct:rec.ct});
@@ -443,6 +451,17 @@ test('B3 (real bound): more than 30,000 records on one child; "Hent fjernede bar
     assert.ok(JSON.stringify(B.kids).length<700000,'phone storage stays bounded: '+JSON.stringify(B.kids).length);
   }
   assert.equal(snapshot(B),truth);
+  // A compromised relay now serves the very first review again, thirty thousand records later, with a fresh sequence number and
+  // a receive time that sorts it after everything: it is not remembered by the id window and it is long folded.
+  const first=(await db.prepare("SELECT seq, record_id AS id, child_id AS child, kind, received_at AS at, clock_ok AS ck, iv, ct FROM sync_records WHERE family_id=?1 AND child_id=?2 ORDER BY seq LIMIT 1 OFFSET 2").bind(await fidOf(fam),ada.id).first());
+  assert.ok(!B.kid('Ada').sync.seen.includes(first.id.slice(0,16)),'the id window has long forgotten it');
+  assert.ok(B.kid('Ada').sync.wm>first.seq+10000,'and it is more than 10,000 records old');
+  for(const restart of [false,true]){
+    if(restart)B.reload();
+    replayVia(B,[first],{at:clock.now()+30*DAY});assert.deepEqual(await B.sync(),{ok:true});await resumeAtHead(fam,B);
+    assert.equal(snapshot(B),truth,'replay after >10,000 later records (restart: '+restart+') changed nothing');
+    assert.equal(JSON.stringify(facts(B)),JSON.stringify(f0));
+  }
 });
 
 /* ---------------- cross-cutting: generations and replay ---------------- */
@@ -491,4 +510,249 @@ test('an own record that the Worker stored but whose acknowledgement never arriv
   assert.equal(ada.learning.items[0].ev.length,1,'applied once');
   await A.sync();assert.equal(snapshot(A),snapshot(B));
   assert.deepEqual(await B.sync(),{ok:true});assert.equal(ada.learning.items[0].ev.length,1);
+});
+
+/* ---------------- R1: a compromised relay cannot replay old learning evidence as new ---------------- */
+// What a malicious Worker can do: take a stored record (same id, same ciphertext) and serve it again under a fresh sequence number.
+async function storedOps(fam,dev,type){
+  const st=dev.engine.state(),k=await S.deriveKeys(globalThis.crypto.subtle,await S.parseKey(globalThis.crypto.subtle,st.key));
+  const fid=await fidOf(fam),out=[];
+  for(const r of (await db.prepare("SELECT seq, record_id AS id, child_id AS child, kind, received_at AS at, clock_ok AS ck, iv, ct FROM sync_records WHERE family_id=?1 AND kind='op' ORDER BY seq").bind(fid).all()).results){
+    const p=await S.open(globalThis.crypto.subtle,k.encKey,st.gen,r);if(p&&p.type===type)out.push({row:r,p});
+  }
+  return out;
+}
+const replayVia=(dev,rows,{at}={})=>{dev.intercept=async(path,body,go)=>{
+  const r=await go();if(path!=='/sync/pull'||r.status!==200||r.data.more)return r;       // served with the last page of a download
+  const data=JSON.parse(JSON.stringify(r.data));let seq=Math.max(data.next,data.head,Number(body.cursor));
+  for(const x of rows){seq++;data.records.push({seq,id:x.id,child:x.child,kind:x.kind,at:at??data.serverNow,ck:1,iv:x.iv,ct:x.ct});}
+  data.next=seq;data.head=seq;dev.intercept=null;return {...r,data};
+};};
+// The relay's invented sequence numbers are not the Worker's real ones: point the phone's cursor back at the real head.
+const realHead=async(fam)=>Number((await one(fam,'SELECT head FROM sync_families WHERE family_id=?1')).head);
+const resumeAtHead=async(fam,dev)=>{const h=await realHead(fam);dev.state=JSON.stringify({...JSON.parse(dev.state),cursor:h});for(const k of dev.kids)if(k.sync)k.sync.wm=Math.min(k.sync.wm,h);};   // (a relay that lied about sequence numbers can make a phone skip records: DoS, not evidence)
+const evidenceFacts=d=>JSON.stringify(canon(d.kids.map(k=>({totals:k.learning.totals,skills:Object.entries(k.learning.skills).map(([id,r])=>[id,r.box,r.due,r.ev.map(e=>e.id),r.independentAt,r.retainedAt]),words:k.learning.items.map(w=>[w.id,w.box,w.due,w.lastAt,w.ev.map(e=>[e.t,e.ok,e.delayed])]),sessions:k.learning.sessions.map(s=>s.id)}))));
+test('R1: an old word-review record served again under a new sequence number, after the recent-id window forgot it, gains nothing',async()=>{
+  const small=clientRealm(cut('seen:10000','seen:40'));
+  const {A,B,fam}=await longHistory({reviews:240,realm:small,name:'r1'});
+  assert.equal(B.kid('Ada').sync.seen.length,40,'the id window is full and has forgotten the early records');
+  const old=(await storedOps(fam,B,'word-review'))[3];assert.ok(old,'an early review');
+  assert.ok(!B.kid('Ada').sync.seen.includes(old.row.id.slice(0,16)),'its id is no longer remembered');
+  A.practice(A.kid('Ada'),'sub1');await A.sync();             // one honest new event for the next download
+  // The relay also chooses the receive time (`at`), so it can order the replay after everything else.
+  replayVia(B,[old.row],{at:A.now()+30*DAY});assert.deepEqual(await B.sync(),{ok:true});
+  await resumeAtHead(fam,B);await A.sync();
+  assert.equal(evidenceFacts(B),evidenceFacts(A),'only the honest new event arrived; the replay added nothing');
+  assert.equal(snapshot(B),snapshot(A));
+});
+const AT_END=A=>({at:A.now()+30*DAY});
+test('R2: every kind of operation is replay-safe, however old it is and wherever the relay orders it (skill, word-add, word-review, session, profile, helped)',async()=>{
+  const small=clientRealm(cut('seen:10000','seen:40'));
+  const {A,B,fam}=await longHistory({reviews:240,realm:small,name:'r2',extras:true});
+  const all=[];
+  for(const type of ['skill','word-add','word-review','word-remove','session','profile','helped']){
+    const ops=await storedOps(fam,B,type);assert.ok(ops.length,'a stored '+type);all.push(...ops.slice(0,type==='word-review'?3:2));
+  }
+  const mine=all.map(x=>x.row);
+  assert.ok(mine.every(r=>!B.kid('Ada').sync.seen.includes(r.id.slice(0,16))||r.seq>B.kid('Ada').sync.wm),'old ones are forgotten by the id window');
+  A.practice(A.kid('Ada'),'sub1');await A.sync();await B.sync();
+  B.reviewWord(B.kid('Ada'),B.kid('Ada').learning.items[0].id,{ok:true});await B.sync();await A.sync();   // honest work still counts
+  assert.equal(snapshot(A),snapshot(B));
+  const before=evidenceFacts(A);
+  replayVia(B,mine,AT_END(A));assert.deepEqual(await B.sync(),{ok:true});await resumeAtHead(fam,B);await A.sync();
+  assert.equal(evidenceFacts(B),evidenceFacts(A));assert.equal(evidenceFacts(A),before);
+  assert.equal(snapshot(B),snapshot(A));
+  assert.equal(B.kid('Ada').learning.items.some(w=>w.word==='hund'),false,'a removed word is not resurrected by replaying its word-add');
+  assert.equal(B.kid('Ada').learning.sessions.length,2);
+});
+test('R3: replay after restart, after hide/unhide and while a rebuild is in progress; honest events keep working',async()=>{
+  const small=clientRealm(cut('seen:10000','seen:40'));
+  const {A,B,fam}=await longHistory({reviews:240,realm:small,name:'r3',extras:true});
+  const old=(await storedOps(fam,B,'word-review')).slice(0,3).map(x=>x.row),before=evidenceFacts(B);
+  B.reload();                                                                     // restart
+  A.practice(A.kid('Ada'),'sub1');await A.sync();
+  replayVia(B,old,AT_END(A));assert.deepEqual(await B.sync(),{ok:true});await resumeAtHead(fam,B);await A.sync();
+  assert.equal(evidenceFacts(B),evidenceFacts(A));
+  // hide, unhide: the family log is delivered again, with the replay mixed into the rebuild.
+  B.engine.hide(B.kid('Bo'));B.engine.unhide();B.reload();
+  replayVia(B,old,AT_END(A));assert.deepEqual(await B.sync(),{ok:true});await resumeAtHead(fam,B);
+  assert.equal(evidenceFacts(B),evidenceFacts(A));assert.equal(snapshot(B),snapshot(A));
+  // Even a brand-new phone that downloads a log containing a duplicate of an old record applies it once.
+  const C=await device(fam,B.fam.__clock||world(),{realm:small});assert.ok((await C.engine.join({key:A.engine.state().key})).ok);
+  replayVia(C,old,AT_END(A));assert.deepEqual(await C.sync(),{ok:true});await resumeAtHead(fam,C);assert.deepEqual(await C.sync(),{ok:true});
+  assert.equal(evidenceFacts(C),evidenceFacts(A));
+  // Honest new work still counts, exactly once, on every phone. (A relay that chooses receive times can make a phone fold early and
+  // so change the ORDER derived state is computed in; that is the documented re-timing power. It must not add or remove evidence,
+  // so the probe is a distinct session summary.)
+  B.archive(B.kid('Ada'),{id:'honest-1'});await B.sync();await A.sync();await C.sync();
+  for(const d of [A,B,C])assert.equal(d.kid('Ada').learning.sessions.filter(x=>x.id==='honest-1').length,1);
+  assert.equal(A.kid('Ada').learning.sessions.length,B.kid('Ada').learning.sessions.length);assert.equal(A.kid('Ada').learning.sessions.length,C.kid('Ada').learning.sessions.length);
+});
+test('R4: the operation identity is authenticated: an altered identity, record id, child or generation fails to open; a relay cannot mint a fresh one',async()=>{
+  const {fam,A}=await pair('r4');
+  const ada=A.kid('Ada');A.addWord(ada,'katt','cat');await A.sync();
+  const [op]=await storedOps(fam,A,'word-add');assert.equal(op.p.v,2);assert.match(op.p.o.s,/^[A-Za-z0-9_-]{12}$/);assert.equal(op.p.o.n>=1,true);
+  const st=A.engine.state(),k=await S.deriveKeys(globalThis.crypto.subtle,await S.parseKey(globalThis.crypto.subtle,st.key));
+  const open=r=>S.open(globalThis.crypto.subtle,k.encKey,st.gen,r);
+  assert.ok(await open(op.row),'control: the stored record opens');
+  const flip=(t,i)=>t.slice(0,i)+(t[i]==='A'?'B':'A')+t.slice(i+1);
+  for(const i of [0,5,20,40])assert.equal(await open({...op.row,ct:flip(op.row.ct,i)}),null,'a changed ciphertext (e.g. a changed counter) does not authenticate: byte '+i);
+  assert.equal(await open({...op.row,id:A.engine.newId()}),null,'another record id');
+  assert.equal(await open({...op.row,child:A.engine.newId()}),null,'another child');
+  assert.equal(await open({...op.row,kind:'base'}),null,'another kind');
+  assert.equal(await S.open(globalThis.crypto.subtle,k.encKey,A.engine.newId(),op.row),null,'another generation');
+  // The relay holds no key: random bytes are not a record, and a record sealed under another key is not either.
+  const rnd=globalThis.crypto.getRandomValues(new Uint8Array(op.row.ct.length)),fake=S.b64url(rnd).slice(0,op.row.ct.length);
+  assert.equal(await open({...op.row,ct:fake}),null);
+  const other=await S.deriveKeys(globalThis.crypto.subtle,new Uint8Array(16).fill(9));
+  const forged=await S.seal(globalThis.crypto.subtle,n=>globalThis.crypto.getRandomValues(new Uint8Array(n)),other.encKey,st.gen,{id:op.row.id,child:op.row.child,kind:'op'},{...op.p,o:{s:op.p.o.s,n:op.p.o.n+1000}});
+  assert.equal(await open(forged),null,'a forged identity sealed without the family key');
+  // The payload schema accepts only well-formed identities.
+  const base={type:'word-review',v:2,t:1000,after:0,wordId:'w1',s:0,ok:true,c:'',d:true};
+  for(const bad of [undefined,null,{s:'x',n:1},{s:'AAAAAAAAAAAA',n:0},{s:'AAAAAAAAAAAA',n:-1},{s:'AAAAAAAAAAAA',n:1.5},{s:'AAAAAAAAAAAA',n:2**40},{s:'AAAAAAAAAAAA',n:1,extra:1},{s:'__proto__AAAA',n:1}])
+    assert.equal(S.checkPayload('op',{...base,o:bad},''),null,JSON.stringify(bad));
+  assert.ok(S.checkPayload('op',{...base,o:{s:'AAAAAAAAAAAA',n:1}},''));
+  assert.equal(S.checkPayload('op',{...base,v:1,o:{s:'AAAAAAAAAAAA',n:1}},''),null,'a v1 operation carries no identity field');
+  assert.equal(S.checkPayload('base',{type:'base',v:2,t:1,after:0},''),null);
+});
+test('R5: the replay record is bounded and exact: contiguous prefix, bounded out-of-order set, junk cannot grow it, corrupt stored state is a local copy',async()=>{
+  const st0={learning:L.empty(),meta:{profile:{name:'x',age:8,interests:'',readAloud:false,t:1,id:'A'.repeat(21)+'A'},helped:{},alias:{}}};
+  const rec=(id,seq)=>({id,seq,kind:'op',at:5000,ck:1});
+  const word={id:'w1',word:'katt',meaning:'cat'};
+  const ADD=(n,s='AAAAAAAAAAAA')=>({type:'word-add',v:2,o:{s,n},t:1000+n,after:0,word:{id:'w'+s+n,word:'ord'+s+n,meaning:'m'+n}});
+  const run=(ops)=>{let st=JSON.parse(JSON.stringify(st0));for(const [i,p] of ops.entries())st=S.apply(st,rec('I'.repeat(21)+'A',i),S.checkPayload('op',p,''));return st;};
+  // Contiguous, out of order, duplicate and replayed: each counter counts once.
+  let st=run([ADD(1),ADD(2),ADD(2),ADD(1),ADD(4),ADD(3),ADD(3),ADD(4),ADD(5)]);
+  assert.equal(st.learning.items.length,5);assert.equal(JSON.stringify(st.meta.vc.AAAAAAAAAAAA),JSON.stringify({h:5,x:[]}),'out-of-order counters collapse into the prefix');
+  // Separate streams are independent.
+  st=run([ADD(1),ADD(1,'BBBBBBBBBBBB'),ADD(1),ADD(1,'BBBBBBBBBBBB')]);assert.equal(st.learning.items.length,2);
+  // Junk far above the prefix is held in a bounded set and then refused; the genuine next counter always gets in.
+  const junk=[];for(let i=0;i<S.LIMITS.holes+20;i++)junk.push(ADD(1000+i*2));
+  st=run([...junk,ADD(1),ADD(2)]);assert.equal(st.meta.vc.AAAAAAAAAAAA.x.length,S.LIMITS.holes);assert.equal(st.meta.vc.AAAAAAAAAAAA.h,2,'in-order operations are never blocked by junk');
+  // The number of streams is bounded too.
+  const many=[];for(let i=0;i<S.LIMITS.streams+10;i++)many.push(ADD(1,String(i).padStart(12,'S')));
+  assert.equal(Object.keys(run(many).meta.vc).length,S.LIMITS.streams);
+  // Version 1 operations keep their old semantics (no identity), and mixed streams converge.
+  st=run([{...ADD(1),v:1,o:undefined,type:'word-add',word:{id:'wl',word:'gammel',meaning:'old'}},ADD(1)].map(p=>{const q={...p};if(q.v===1)delete q.o;return q}));
+  assert.equal(st.learning.items.length,2);
+  // Stored state is validated: a malformed replay record never loads (the child becomes a local copy, nothing is deleted).
+  const good={v:1,cp:{st:{learning:L.empty(),meta:{profile:{name:'x',age:8,interests:'',readAloud:false,t:1,id:'A'.repeat(21)+'A'},helped:{},vc:{AAAAAAAAAAAA:{h:3,x:[7,9]}}}}},log:[],pending:[],seen:[],wm:0,out:{s:'AAAAAAAAAAAA',n:3}};
+  assert.ok(S.normalizeSync(good));
+  const bad=f=>{const x=JSON.parse(JSON.stringify(good));f(x);return S.normalizeSync(x);};
+  assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.x=[9,7];}),null);assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.x=[4];}),null);
+  assert.equal(bad(x=>{x.cp.st.meta.vc.bad={h:0,x:[]};}),null);assert.equal(bad(x=>{x.cp.st.meta.vc=[];}),null);assert.equal(bad(x=>{x.out={s:'x',n:1};}),null);
+});
+test('R6: an own stream never reuses a counter after local storage was restored from an older copy',async()=>{
+  const {A,B,fam}=await pair('r6');
+  const ada=B.kid('Ada'),w=B.addWord(ada,'katt','cat');B.reviewWord(ada,w.id,{ok:true});
+  const snapshotOld=B.persisted;                                    // storage as of now
+  B.reviewWord(ada,w.id,{ok:true});B.reviewWord(ada,w.id,{ok:true});await B.sync();   // two more operations reach the Worker
+  const sent=ada.sync.out.n;
+  B.persisted=snapshotOld;B.reload();B.state=JSON.stringify({...JSON.parse(B.state),cursor:0});   // rolled back
+  assert.ok(B.kid('Ada').sync.out.n<sent);
+  await B.sync();                                                   // its own records come back
+  assert.equal(B.kid('Ada').sync.out.n,sent,'the counter moved past everything the Worker already holds');
+  B.reviewWord(B.kid('Ada'),B.kid('Ada').learning.items[0].id,{ok:true});await B.sync();await A.sync();
+  assert.equal(snapshot(A),snapshot(B));
+});
+test('R7: replay after a Trusted Backup restore: a restored copy is a new family child with its own stream; old family records never touch it',async()=>{
+  const small=clientRealm(cut('seen:10000','seen:40'));
+  const {A,B,fam}=await longHistory({reviews:240,realm:small,name:'r7',extras:true});
+  const oldOps=(await storedOps(fam,B,'word-review')).slice(0,3).map(x=>x.row);
+  // Phone C restores a backup of Ada (what the import produces: a new, unshared profile with the learning in it; no ids, no sync state).
+  const C=await device(fam,B.fam.__clock||world(),{realm:small});assert.ok((await C.engine.join({key:A.engine.state().key})).ok);
+  const restored={...blankKid('Ada-kopi'),age:9,learning:JSON.parse(JSON.stringify(B.kid('Ada').learning))};
+  C.kids=[restored];assert.equal(restored.sync,undefined);
+  assert.ok(C.engine.share(restored));C.saveKids();assert.deepEqual(await C.sync(),{ok:true});
+  assert.notEqual(restored.id,B.kid('Ada').id,'a restored copy is a new child');
+  assert.equal(restored.sync.out?.s===undefined||restored.sync.out.s!==B.kid('Ada').sync.out?.s,true);
+  // The relay serves the old family's records (another child's id) and the copy's own earliest records again.
+  const own=(await db.prepare("SELECT seq, record_id AS id, child_id AS child, kind, received_at AS at, clock_ok AS ck, iv, ct FROM sync_records WHERE family_id=?1 AND child_id=?2 AND kind='base'").bind(await fidOf(fam),restored.id).all()).results;
+  const mine=await storedOps(fam,C,'session');
+  replayVia(C,[...oldOps,...own,...mine.map(x=>x.row)],{at:C.now()+30*DAY});assert.deepEqual(await C.sync(),{ok:true});await resumeAtHead(fam,C);
+  assert.equal(C.kids.filter(k=>k.sync).length,3,'Ada and Bo (family) arrive next to the copy; nothing is merged into it');
+  const copy=C.kids.find(k=>k.id===restored.id);
+  assert.equal(JSON.stringify(canon(copy.learning.items.map(w=>w.ev.length))),JSON.stringify(canon(restored.learning.items.map(w=>w.ev.length))));
+  assert.equal(copy.learning.sessions.length,restored.learning.sessions.length);
+  // And the copy keeps working normally.
+  C.addWord(copy,'sol','sun');await C.sync();await A.sync();assert.ok(A.kids.find(k=>k.id===restored.id)?.learning.items.some(w=>w.word==='sol'));
+});
+test('R8: replay across a family reset cannot cross the generation; the new generation starts with empty replay records',async()=>{
+  const {fam,A,B}=await pair('r8');
+  const ada=A.kid('Ada'),w=A.addWord(ada,'katt','cat');A.reviewWord(ada,w.id,{ok:true});await A.sync();await B.sync();
+  const olds=(await storedOps(fam,A,'word-review')).map(x=>x.row);assert.ok(olds.length);
+  const oldGen=A.engine.state().gen,r=await A.engine.reset({code:fam.code});assert.ok(r.ok);await A.sync();
+  assert.equal(A.kid('Ada').sync.out,undefined,'a new child has no authoring stream yet');
+  assert.equal(JSON.stringify(A.kid('Ada').sync.cp.st?.meta?.vc??null).length<80,true);
+  assert.ok((await B.engine.join({key:r.key})).ok);
+  // The relay presents the old generation's records (same ciphertext, same ids) in the new one, under the new child's id and its own.
+  const before=evidenceFacts(A);
+  for(const dev of [A,B]){replayVia(dev,olds.map(x=>({...x,child:A.kid('Ada').id})).concat(olds),{at:dev.now()+30*DAY});assert.deepEqual(await dev.sync(),{ok:true});await resumeAtHead(fam,dev);assert.ok(dev.engine.state().undecryptable>=olds.length,'unreadable in the new generation');}
+  assert.equal(evidenceFacts(A),before);assert.equal(snapshot(A),snapshot(B));
+  assert.notEqual(oldGen,A.engine.state().gen);
+});
+test('R9: migration: version-1 records and state from before the operation identity stay readable; mixed phones converge; new work is version 2',async()=>{
+  const legacy=clientRealm(cut('{v:2,o,after:s.serverTime,...payload,t}','{v:1,after:s.serverTime,...payload,t}'));
+  const clock=world(),fam=family(db,clock,'b9'+(n++));
+  const A=await device(fam,clock,{realm:legacy}),B=await device(fam,clock);               // A still writes the old format
+  const ada=A.kids[0];ada.name='Ada';ada.age=9;A.practice(ada,'add1');const w=A.addWord(ada,'katt','cat');
+  const c=await A.engine.create({code:fam.code});assert.ok(c.ok);A.engine.shareAll();A.saveKids();
+  A.reviewWord(ada,w.id,{ok:true});A.practice(ada,'sub1');assert.deepEqual(await A.sync(),{ok:true});
+  assert.ok((await B.engine.join({key:c.key})).ok);assert.deepEqual(await B.sync(),{ok:true});
+  const ops=await storedOps(fam,A,'word-review');assert.equal(ops[0].p.v,1,'the old client wrote version 1 (no identity)');
+  B.reviewWord(B.kid('Ada'),B.kid('Ada').learning.items[0].id,{ok:true});B.practice(B.kid('Ada'),'add1');
+  A.practice(A.kid('Ada'),'add1');
+  assert.deepEqual(await B.sync(),{ok:true});assert.deepEqual(await A.sync(),{ok:true});assert.deepEqual(await B.sync(),{ok:true});
+  assert.equal(snapshot(A),snapshot(B));assert.equal(snapshot(A),await reference(A));
+  const mixed=await storedOps(fam,B,'word-review');assert.deepEqual(mixed.map(x=>x.p.v).sort(),[1,2]);
+  // Stored sync data written before this field existed (no `out`, no `vc`) loads, and the next operation starts a stream.
+  const old=JSON.parse(B.persisted);for(const k of old)if(k.sync){delete k.sync.out;if(k.sync.cp.st)delete k.sync.cp.st.meta.vc;}
+  B.persisted=JSON.stringify(old);B.reload();assert.ok(B.kid('Ada').sync,'still shared, not a local copy');
+  B.reviewWord(B.kid('Ada'),B.kid('Ada').learning.items[0].id,{ok:true});assert.deepEqual(await B.sync(),{ok:true});await A.sync();
+  assert.equal(snapshot(A),snapshot(B));
+  const v2=(await storedOps(fam,B,'word-review')).filter(x=>x.p.v===2);assert.equal(v2.length,2);
+});
+
+/* ---------------- F4: deleted child ids are kept for the whole generation, with a bound; a reset clears them safely ---------------- */
+test('F4: a stale phone that retries its (lost-acknowledgement) base after hundreds of later deletions is still refused; the bound is explicit and reset clears it',async()=>{
+  const {fam,A,B}=await pair('f4');
+  const fid=await fidOf(fam),ada=A.kid('Ada');
+  // B recorded Ada's base as pending (its acknowledgement was lost): the exact request it will retry.
+  assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:ada}),{ok:true});
+  // 120 more deletions (the old bound was 100 and pruned the oldest).
+  for(let i=0;i<120;i++)await db.prepare("INSERT INTO sync_children (family_id, child_id, status, created_at, deleted_at) VALUES (?1, ?2, 'deleted', 1, ?3)").bind(fid,'Y'+String(i).padStart(20,'0')+'A',i+1).run();
+  const st=A.engine.state(),key=await S.deriveKeys(globalThis.crypto.subtle,await S.parseKey(globalThis.crypto.subtle,st.key));
+  const payload={type:'base',v:1,t:A.now(),after:0,profile:{name:'Ada',age:9,interests:'',readAloud:false},learning:{version:L.VERSION,skills:{},items:[],sessions:[],totals:L.empty().totals}};
+  const rec=await S.seal(globalThis.crypto.subtle,n=>globalThis.crypto.getRandomValues(new Uint8Array(n)),key.encKey,st.gen,{id:A.engine.newId(),child:ada.id,kind:'base'},payload);
+  const r=await call(fam,'/sync/push',{v:1,gen:st.gen,clientNow:A.now(),records:[rec]},A.token());
+  assert.equal(r.status,200);assert.equal(r.data.results[0].status,'child_deleted','the deleted identity stays dead');
+  assert.equal((await rows(fam,"SELECT child_id FROM sync_children WHERE family_id=?1 AND child_id=?2 AND status='active'",ada.id)).length,0);
+  // The bound: 500 deleted ids per generation; the next deletion says so instead of forgetting an older one.
+  for(let i=120;i<498;i++)await db.prepare("INSERT INTO sync_children (family_id, child_id, status, created_at, deleted_at) VALUES (?1, ?2, 'deleted', 1, ?3)").bind(fid,'Y'+String(i).padStart(20,'0')+'A',i+1).run();
+  const bo=blankKid('Bo');A.kids.push(bo);A.practice(bo,'add1');A.engine.share(bo);A.saveKids();assert.deepEqual(await A.sync(),{ok:true});
+  const bo2=blankKid('Bo2');A.kids.push(bo2);A.practice(bo2,'add1');A.engine.share(bo2);A.saveKids();assert.deepEqual(await A.sync(),{ok:true});
+  assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:bo}),{ok:true});          // the 500th
+  const full=await A.engine.deleteChild({code:fam.code,kid:bo2});
+  assert.equal(full.ok,false);assert.equal(full.code,'deleted_full');assert.ok(A.kids.includes(bo2),'nothing was deleted or forgotten');
+  assert.equal((await counts(fam)).deleted,500);
+  // Reset (always possible) starts a clean generation: the deleted-id memory of the old one is not needed there, because nothing
+  // from the old generation can write into the new one.
+  const reset=await A.engine.reset({code:fam.code});assert.ok(reset.ok);assert.equal((await counts(fam)).deleted,0);
+  await A.sync();const k2=A.kids.find(x=>x.name==='Bo2');assert.ok(k2?.sync);assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:k2}),{ok:true});
+  void B;
+});
+
+test('LOW: "Fjern fra denne telefonen" / "Hent fjernede barn tilbake hit" pressed while a sync round is running are not written back over',async()=>{
+  const {A,B}=await pair('lost');
+  B.engine.hide(B.kid('Bo')||B.kid('Ada'));                                    // Ada hidden on B
+  assert.equal(B.engine.state().hidden.length,1);
+  // The parent presses "fetch removed children" while the round's download is in flight.
+  B.intercept=async(path,body,go)=>{if(path==='/sync/pull'){B.intercept=null;B.engine.unhide();}return go();};
+  assert.deepEqual(await B.sync(),{ok:true});
+  assert.equal(B.engine.state().hidden.length,0,'the unhide survived the running round');
+  assert.deepEqual(await B.sync(),{ok:true});
+  assert.ok(B.kid('Ada'),'and the child is back after the next download');assert.equal(snapshot(A),snapshot(B));
+  // The same for hide during a round.
+  B.intercept=async(path,body,go)=>{if(path==='/sync/pull'){B.intercept=null;B.engine.hide(B.kid('Ada'));}return go();};
+  await B.sync();assert.equal(B.engine.state().hidden.length,1);assert.equal(B.kid('Ada'),undefined);
 });

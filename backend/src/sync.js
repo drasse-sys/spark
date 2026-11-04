@@ -8,14 +8,14 @@
 const SYNC_ID=/^[A-Za-z0-9_-]{21}[AQgw]$/,SYNC_IV=/^[A-Za-z0-9_-]{16}$/,SYNC_B64=/^[A-Za-z0-9_-]+$/;
 const SYNC_PROOF=/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/,SYNC_DEVICE=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const SYNC_SKEW=86400000,SYNC_DAY=86400000;
-const SYNC_LIMITS=Object.freeze({pushRecords:40,pushBody:700000,opCt:43700,baseCt:349600,tombCt:1400,pullRows:200,pullBytes:2000000,children:20,childRows:100,familyRecords:200000,familyBytes:268435456,devices:200,devicesInactive:50,revokedKeepMs:366*86400000});
+const SYNC_LIMITS=Object.freeze({pushRecords:40,pushBody:700000,opCt:43700,baseCt:349600,tombCt:1400,pullRows:200,pullBytes:2000000,children:20,deletedPerGeneration:500,familyRecords:200000,familyBytes:268435456,devices:200,devicesInactive:50,revokedKeepMs:366*86400000});
 const SYNC_TEXT={
   off:'Ikke funnet.',auth:'Enheten må kobles til på nytt.',rate:'For mange forespørsler på kort tid. Vent litt og prøv igjen.',
   bad:'Ugyldig forespørsel.',big:'Forespørselen er for stor.',code:'Feil familiekode.',setup:'Spark-serveren må settes opp av en forelder.',
   exists:'Synkronisering er allerede startet for denne familien.',none:'Synkronisering er ikke startet for denne familien.',
   key:'Feil synkroniseringsnøkkel.',revoked:'Denne enheten er fjernet fra familiens synkronisering.',enroll:'Denne enheten må bli med i synkroniseringen på nytt.',
   changed:'Synkroniseringen er startet på nytt. Skriv inn den nye nøkkelen.',quota:'Familiens synkroniseringsplass er full.',
-  device:'Ukjent enhet.',child:'Ukjent barn.',unavailable:'Synkroniseringen er utilgjengelig akkurat nå.'
+  device:'Ukjent enhet.',child:'Ukjent barn.',deletedFull:'Familien har slettet for mange barn i denne synkroniseringen. Start på nytt med ny nøkkel for å rydde opp.',unavailable:'Synkroniseringen er utilgjengelig akkurat nå.'
 };
 const syncEnabled=env=>env.SYNC_ENABLED==='1'&&!!env.SYNC_DB;
 const syncKeys=(o,keys)=>!!o&&typeof o==='object'&&!Array.isArray(o)&&Object.keys(o).sort().join()===keys.slice().sort().join();
@@ -260,7 +260,9 @@ async function syncHandle(request,env,url,c,h){
       const [before]=await db.batch([
         db.prepare('SELECT gen FROM sync_families WHERE family_id=?1').bind(fam),
         db.prepare('DELETE FROM sync_records WHERE family_id=?1').bind(fam),
-        db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='active'").bind(fam),
+        // Deleted child ids belong to the generation they were deleted in: nothing from an earlier generation can write into the
+        // new one (membership and ciphertexts are bound to the generation), and a phone that re-joins forks what it holds.
+        db.prepare('DELETE FROM sync_children WHERE family_id=?1').bind(fam),
         db.prepare('INSERT INTO sync_families (family_id, gen, verifier, head, record_count, byte_count, created_at) VALUES (?1, ?2, ?3, 0, 0, 0, ?4) ON CONFLICT(family_id) DO UPDATE SET gen=excluded.gen, verifier=excluded.verifier, record_count=0, byte_count=0').bind(fam,gen,verifier,now),
         // The caller proved the family code (the parent), so its own device is (re)enrolled for the new generation. A revoked
         // row is never touched (the WHERE below), whatever happened since the check above.
@@ -292,18 +294,18 @@ async function syncHandle(request,env,url,c,h){
     // Already deleted in this generation (a retry after a lost reply, or the same request twice): done, changes nothing.
     if(known?.status==='deleted'&&known.tgen===m.row.gen)return reply({v:1,deleted:true});
     if(known?.status!=='active')return error(404,'child_unknown','child');
-    const guard=`${syncMemberSql('?1','?8','?3')} AND EXISTS (SELECT 1 FROM sync_children g WHERE g.family_id=?1 AND g.child_id=?2 AND g.status='active')`;
+    // Deleted ids are kept for the whole generation (a stale phone's retried base must never revive one), up to a bound; a family
+    // at the bound starts a new generation (reset), which clears them safely.
+    const guard=`${syncMemberSql('?1','?8','?3')} AND EXISTS (SELECT 1 FROM sync_children g WHERE g.family_id=?1 AND g.child_id=?2 AND g.status='active') AND (SELECT COUNT(*) FROM sync_children dc WHERE dc.family_id=?1 AND dc.status='deleted')<?9`;
     const out=await db.batch([
-      db.prepare(`DELETE FROM sync_records WHERE family_id=?1 AND child_id=?2 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
-      db.prepare(`INSERT OR REPLACE INTO sync_tombstones (family_id, child_id, gen, record_id, iv, ct, deleted_at) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
-      db.prepare(`INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, head+1, ?4, ?2, 'tombstone', ?7, 1, ?5, ?6 FROM sync_families WHERE family_id=?1 AND gen=?3 AND ${guard} AND NOT EXISTS (SELECT 1 FROM sync_records WHERE family_id=?1 AND record_id=?4)`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
+      db.prepare(`DELETE FROM sync_records WHERE family_id=?1 AND child_id=?2 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId,SYNC_LIMITS.deletedPerGeneration),
+      db.prepare(`INSERT OR REPLACE INTO sync_tombstones (family_id, child_id, gen, record_id, iv, ct, deleted_at) SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId,SYNC_LIMITS.deletedPerGeneration),
+      db.prepare(`INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, head+1, ?4, ?2, 'tombstone', ?7, 1, ?5, ?6 FROM sync_families WHERE family_id=?1 AND gen=?3 AND ${guard} AND NOT EXISTS (SELECT 1 FROM sync_records WHERE family_id=?1 AND record_id=?4)`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId,SYNC_LIMITS.deletedPerGeneration),
       db.prepare(`UPDATE sync_families SET head=MAX(head,COALESCE((SELECT MAX(seq) FROM sync_records WHERE family_id=?1),0)),
-          record_count=(SELECT COUNT(*) FROM sync_records WHERE family_id=?1), byte_count=(SELECT COALESCE(SUM(LENGTH(ct)),0) FROM sync_records WHERE family_id=?1) WHERE family_id=?1 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
-      db.prepare(`UPDATE sync_children SET status='deleted', deleted_at=?7 WHERE family_id=?1 AND child_id=?2 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId),
-      // Bounded: the newest 100 deleted ids and tombstones are kept. A phone offline for longer than 100 deletions that still
-      // holds an older one gets child_unknown and keeps a local copy, which is never shared again automatically.
-      // (Maintenance only; it runs after the flip and touches only deleted rows.)
-      db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='deleted' AND child_id NOT IN (SELECT child_id FROM sync_children WHERE family_id=?1 AND status='deleted' ORDER BY deleted_at DESC, child_id LIMIT 100)").bind(fam),
+          record_count=(SELECT COUNT(*) FROM sync_records WHERE family_id=?1), byte_count=(SELECT COALESCE(SUM(LENGTH(ct)),0) FROM sync_records WHERE family_id=?1) WHERE family_id=?1 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId,SYNC_LIMITS.deletedPerGeneration),
+      db.prepare(`UPDATE sync_children SET status='deleted', deleted_at=?7 WHERE family_id=?1 AND child_id=?2 AND ${guard}`).bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now,device.deviceId,SYNC_LIMITS.deletedPerGeneration),
+      // Tombstones (what a phone that re-joins after a reset verifies) are bounded across generations: the newest 100 are kept.
+      // A phone that missed more than 100 and still holds an older child keeps it as a local copy, never shared automatically.
       db.prepare('DELETE FROM sync_tombstones WHERE family_id=?1 AND child_id NOT IN (SELECT child_id FROM sync_tombstones WHERE family_id=?1 ORDER BY deleted_at DESC, child_id LIMIT 100)').bind(fam)
     ]);
     if(out[4].meta?.changes===1)return reply({v:1,deleted:true});
@@ -311,6 +313,10 @@ async function syncHandle(request,env,url,c,h){
     const again=await syncMember(db,fam,device.deviceId,b.gen);if(!again.row)return error(again.status,again.code,SYNC_CODE_TEXT[again.code]);
     const now2=await deleted();
     if(now2?.status==='deleted'&&now2.tgen===again.row.gen)return reply({v:1,deleted:true});
+    if(now2?.status==='active'){
+      const full=Number((await db.prepare("SELECT COUNT(*) AS n FROM sync_children WHERE family_id=?1 AND status='deleted'").bind(fam).first())?.n||0)>=SYNC_LIMITS.deletedPerGeneration;
+      if(full)return error(507,'deleted_full','deletedFull');
+    }
     return error(404,'child_unknown','child');
   }catch{
     // Content-free: the route name only. Never a body, SQL, id, key or token.

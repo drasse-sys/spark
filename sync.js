@@ -20,10 +20,11 @@
   const ID=/^[A-Za-z0-9_-]{21}[AQgw]$/;      // 16 random bytes, canonical unpadded base64url
   const IV=/^[A-Za-z0-9_-]{16}$/;             // 12 bytes
   const B64=/^[A-Za-z0-9_-]+$/;
-  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:10000,ids:200,pending:5000});
+  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:10000,streams:64,holes:256,ids:200,pending:5000});
   const HELPED=['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'];
   const ERRORS=['slurv','fakta','metode','begrep','tolking'],CONFIDENCE=['sikker','usikker','gjetter'];
   const enc=new TextEncoder(),dec=new TextDecoder();
+  const STREAM=/^[A-Za-z0-9_-]{12}$/;           // 9 random bytes: one authoring stream per (phone, child)
   const exactKeys=(o,keys)=>!!o&&typeof o==='object'&&!Array.isArray(o)&&Object.keys(o).sort().join()===keys.slice().sort().join();
   const time=t=>Number.isSafeInteger(t)&&t>0;
   const clone=v=>v==null?v:JSON.parse(JSON.stringify(v));
@@ -89,10 +90,16 @@
   };
   // Returns a normalized copy of a valid payload for `kind`, or null.
   function checkPayload(kind,p,child){
-    if(!p||typeof p!=='object'||Array.isArray(p)||p.v!==1||!time(p.t))return null;
-    if(kind==='tombstone')return exactKeys(p,['type','v','t','child'])&&p.type==='tombstone'&&p.child===child?{type:'tombstone',v:1,t:p.t,child}:null;
+    if(!p||typeof p!=='object'||Array.isArray(p)||(p.v!==1&&p.v!==2)||!time(p.t))return null;
+    if(kind==='tombstone')return p.v===1&&exactKeys(p,['type','v','t','child'])&&p.type==='tombstone'&&p.child===child?{type:'tombstone',v:1,t:p.t,child}:null;
     if(!Number.isSafeInteger(p.after)||p.after<0)return null;
-    const head={type:p.type,v:1,t:p.t,after:p.after};
+    // Operation identity (v2): `o = {s, n}`, the recording phone's authoring stream and a per-stream counter 1, 2, 3, ...
+    // It sits inside the authenticated ciphertext, so a relay can replay a record but never mint or alter one. Version 1
+    // operations (written before this field existed) have no identity and keep their older, best-effort duplicate handling.
+    if(kind==='base'&&p.v!==1)return null;
+    const op=p.v===2?p.o:undefined;
+    if(p.v===2&&!(exactKeys(op,['s','n'])&&typeof op.s==='string'&&STREAM.test(op.s)&&Number.isSafeInteger(op.n)&&op.n>=1&&op.n<=2147483647))return null;
+    const head={type:p.type,v:p.v,t:p.t,after:p.after,...(p.v===2?{o:{s:op.s,n:op.n}}:{})};
     if(kind==='base'){
       if(!exactKeys(p,['type','v','t','after','profile','learning'])||p.type!=='base')return null;
       const pr=profile(p.profile),l=p.learning;
@@ -101,7 +108,7 @@
       const m=L.normalizeMemory({...l,sessions:[]});
       return {...head,profile:pr,learning:{version:m.version,skills:m.skills,items:m.items.map(w=>({...w,sentence:''})),sessions:[],totals:m.totals}};
     }
-    if(kind!=='op'||!Object.hasOwn(OPS,p.type)||!exactKeys(p,['type','v','t','after',...OPS[p.type]]))return null;
+    if(kind!=='op'||!Object.hasOwn(OPS,p.type)||!exactKeys(p,['type','v','t','after',...(p.v===2?['o']:[]),...OPS[p.type]]))return null;
     switch(p.type){
       case 'skill':{const e=skillInput(p.e);return e&&Object.hasOwn(L.CATALOG,p.skill)&&typeof p.d==='boolean'?{...head,skill:p.skill,e,d:p.d}:null;}
       case 'word-add':{const w=p.word;return exactKeys(w,['id','word','meaning'])&&typeof w.id==='string'&&WORD_ID.test(w.id)&&str(w.word,1,60)&&str(w.meaning,0,160)?{...head,word:{id:w.id,word:w.word,meaning:w.meaning}}:null;}
@@ -136,7 +143,22 @@
   // Keys carry a prefix, so no word id (e.g. "__proto__") can address the object's prototype.
   const alias=st=>st.meta.alias ||= {};
   const later=(t,id,cur)=>!cur||t>cur.t||t===cur.t&&id>cur.id;
-  // One record applied to a fold state {learning, meta:{profile, helped}}; null until the base arrives.
+  // Replay defence. Each v2 operation carries its author's stream and counter (authenticated, see checkPayload). The fold state
+  // keeps, per stream, the contiguous prefix it has applied (`h`) and the few counters applied out of order above it (`x`,
+  // at most LIMITS.holes). An operation at or below `h`, or already in `x`, is a duplicate and is ignored, whatever sequence
+  // number or receive time the relay gave it. The record lives in the checkpoint state, so it survives compaction, restart,
+  // hide/unhide and every fold; it is a few integers per stream, not an id per operation. Returns whether `p` is new.
+  function firstUse(st,p){
+    if(p.v!==2)return true;
+    const vc=st.meta.vc ||= {},{s,n}=p.o;
+    let e=Object.hasOwn(vc,s)?vc[s]:null;
+    if(!e){if(Object.keys(vc).length>=LIMITS.streams)return false;e=vc[s]={h:0,x:[]};}
+    if(n<=e.h||e.x.includes(n))return false;
+    if(n===e.h+1){e.h=n;while(e.x.length&&e.x[0]===e.h+1)e.h=e.x.shift();return true;}
+    if(e.x.length>=LIMITS.holes)return false;
+    e.x.push(n);e.x.sort((a,b)=>a-b);return true;
+  }
+  // One record applied to a fold state {learning, meta:{profile, helped, vc}}; null until the base arrives.
   function apply(st,rec,p){
     if(p.type==='base'){
       if(st)return st;
@@ -148,6 +170,7 @@
       return {learning,meta:{profile:{...p.profile,t:w.t,id:rec.id},helped,alias:{}}};
     }
     if(!st)return st;
+    if(!firstUse(st,p))return st;
     const w=when(p,rec),m=st.learning;
     switch(p.type){
       case 'skill':L.event(m,p.skill,{...p.e,t:w.t,mayDelay:w.delay&&p.d},w.t);break;
@@ -186,6 +209,12 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
     if(!s||typeof s!=='object'||s.v!==1||!s.cp||typeof s.cp!=='object'||!Array.isArray(s.log)||!Array.isArray(s.pending)||!Array.isArray(s.seen))return null;
     const st=s.cp.st;
     if(st!==null&&!(st&&st.learning?.version===L.VERSION&&st.learning.skills&&Array.isArray(st.learning.items)&&Array.isArray(st.learning.sessions)&&st.meta?.profile&&st.meta.helped))return null;
+    if(st&&st.meta.vc!==undefined){
+      const vc=st.meta.vc;
+      if(!vc||typeof vc!=='object'||Array.isArray(vc)||Object.keys(vc).length>LIMITS.streams)return null;
+      for(const [id,e] of Object.entries(vc))if(!STREAM.test(id)||!exactKeys(e,['h','x'])||!Number.isSafeInteger(e.h)||e.h<0||!Array.isArray(e.x)||e.x.length>LIMITS.holes||!e.x.every((n,i)=>Number.isSafeInteger(n)&&n>e.h+1&&(!i||n>e.x[i-1])))return null;
+    }
+    if(s.out!==undefined&&!(exactKeys(s.out,['s','n'])&&STREAM.test(s.out.s)&&Number.isSafeInteger(s.out.n)&&s.out.n>=0&&s.out.n<=2147483647))return null;
     const log=[];
     for(const r of s.log){
       if(!r||!ID.test(r.id)||!['base','op'].includes(r.kind)||!Number.isSafeInteger(r.at)||![0,1].includes(r.ck)||!Number.isSafeInteger(r.seq))return null;
@@ -193,7 +222,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
     }
     const pending=[];
     for(const op of s.pending){if(!op||!ID.test(op.id)||!['base','op'].includes(op.kind))return null;const p=checkPayload(op.kind,op.p,'');if(!p)return null;pending.push({id:op.id,kind:op.kind,p});}
-    return {v:1,cp:{st},log,pending,seen:s.seen.filter(x=>typeof x==='string'&&x.length===16).slice(-LIMITS.seen),wm:Number.isSafeInteger(s.wm)&&s.wm>0?s.wm:0,...(profile(s.profile)?{profile:profile(s.profile)}:{}),...(s.blocked===true?{blocked:true}:{})};
+    return {v:1,cp:{st},log,pending,seen:s.seen.filter(x=>typeof x==='string'&&x.length===16).slice(-LIMITS.seen),wm:Number.isSafeInteger(s.wm)&&s.wm>0?s.wm:0,...(s.out?{out:{s:s.out.s,n:s.out.n}}:{}),...(profile(s.profile)?{profile:profile(s.profile)}:{}),...(s.blocked===true?{blocked:true}:{})};
   }
   // Local profile and learning as the child's synced state. Fields that never sync stay as they were on this phone.
   function materialize(kid){
@@ -232,6 +261,9 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
       const raw=await parseKey(d.subtle,s.key);if(!raw)throw Error('key');
       keyCache={text:s.key,...await deriveKeys(d.subtle,raw)};return keyCache;
     }
+    // The next operation identity of this phone for this child: its own stream (created on first use) and the next counter.
+    // Committed (`sync.out`) only once the operation is queued, so counters stay gap-free.
+    function nextOp(sync){const out=sync.out||{s:b64url(d.random(9)),n:0};return {s:out.s,n:out.n+1};}
     const shared=()=>d.kids().filter(k=>k.sync);
     // `seen` is a plain array in storage; a Set beside it (keyed by the array, rebuilt if the array changed behind our back)
     // keeps the lookup O(1) for a 10,000-entry window.
@@ -252,10 +284,11 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
       const s=state();if(!kid?.sync||!s.enabled)return false;
       // A phone's own changes do not go back in time across small clock steps, so causal order survives the merge.
       // A step back of more than CLOCK_SKEW is a corrected clock: the earlier reading is not carried forward.
-      const t=s.lastT>payload.t&&s.lastT-payload.t<=SKEW?s.lastT:payload.t,kind='op',p=checkPayload(kind,{v:1,after:s.serverTime,...payload,t},kid.id);
+      const t=s.lastT>payload.t&&s.lastT-payload.t<=SKEW?s.lastT:payload.t,kind='op',o=nextOp(kid.sync),p=checkPayload(kind,{v:2,o,after:s.serverTime,...payload,t},kid.id);
       // A change that cannot be queued must not be lost at the next fold: the child (which already holds the change
       // locally) leaves the family log and stays here as a local copy.
-      if(!p||kid.sync.pending.length>=LIMITS.pending){detach(kid);return false;}
+      if(!p||kid.sync.pending.length>=LIMITS.pending||o.n>2147483647){detach(kid);return false;}
+      kid.sync.out={s:o.s,n:o.n};
       kid.sync.pending.push({id:newId(),kind,p});s.lastT=t;save(s);return true;
     }
     function profileChanged(kid){
@@ -271,7 +304,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
       const base=checkPayload('base',{type:'base',v:1,t:now,after,profile:profileOf(kid),learning:{version:L.VERSION,skills:l.skills,items:l.items,sessions:[],totals:l.totals}},kid.id);
       if(!base)return false;
       kid.sync={...emptySync(),pending:[{id:newId(),kind:'base',p:base}],profile:base.profile};
-      for(const x of l.sessions||[]){const p=checkPayload('op',{type:'session',v:1,t:now,after,session:x},kid.id);if(p)kid.sync.pending.push({id:newId(),kind:'op',p});}
+      for(const x of l.sessions||[]){const o=nextOp(kid.sync),p=checkPayload('op',{type:'session',v:2,o,t:now,after,session:x},kid.id);if(p){kid.sync.out={s:o.s,n:o.n};kid.sync.pending.push({id:newId(),kind:'op',p});}}
       delete kid.fork;return true;
     }
     // Keeps the data on this phone as an unshared profile with a new identity (after a reset, a server-side deletion
@@ -384,7 +417,10 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
             const op=kid.sync?.pending.find(o=>o.id===batch[i].id);if(!op)return;
             if(['ok','dup'].includes(res.status)&&Number.isSafeInteger(res.seq)&&Number.isSafeInteger(res.at)&&[0,1].includes(res.ck)){
               kid.sync.pending=kid.sync.pending.filter(o=>o!==op);
-              if(!incorporated(kid.sync,{seq:res.seq,id:op.id})){kid.sync.log.push({seq:res.seq,id:op.id,kind:op.kind,at:res.at,ck:res.ck,p:op.p});markSeen(kid.sync,op.id);}
+              // A v2 operation is protected by its identity in the fold, so its own acknowledgement never depends on the watermark
+              // (a relay that inflated the watermark must not make this phone lose its own work). v1 keeps the watermark check.
+              const dupe=op.p.v===2?seen(kid.sync,op.id)||kid.sync.log.some(r=>r.id===op.id):incorporated(kid.sync,{seq:res.seq,id:op.id});
+              if(!dupe){kid.sync.log.push({seq:res.seq,id:op.id,kind:op.kind,at:res.at,ck:res.ck,p:op.p});markSeen(kid.sync,op.id);}
             }else if(res.status==='child_deleted')blocked=true;
             else if(res.status==='child_exists'||res.status==='child_unknown'&&!full)lost=true;
             else retry=true;
@@ -399,7 +435,13 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
     async function pull(s,k){
       complete='';
       for(let page=0;page<LIMITS.pullPages;page++){
+        // The parent can remove a child from this phone, or fetch removed children again, while a round is running. This round
+        // works on its own copy of the state, so it adopts those two user decisions (before and after each request) instead of
+        // writing its older copy back over them. A page fetched for a cursor that an "unhide" has just reset is dropped.
+        const adopt=()=>{const live=state();if(live.enabled&&live.gen===s.gen){s.hidden=live.hidden;s.deleted=[...new Set([...live.deleted,...s.deleted])].slice(-LIMITS.ids);if(live.cursor<s.cursor){s.cursor=live.cursor;return true;}}return false;};
+        adopt();
         const r=await d.request('/sync/pull',{v:1,gen:s.gen,cursor:s.cursor});
+        if(adopt())continue;
         const data=r.data;
         if(r.status!==200||!Array.isArray(data?.records)||!Number.isSafeInteger(data.next)||data.next<s.cursor||!time(data.serverNow)||!Array.isArray(data.children))return stop(r);
         const changed=new Set();
@@ -419,6 +461,8 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           // This phone's own record, stored by the Worker, whose acknowledgement never arrived: the download is the acknowledgement.
           // (Left in the queue as well it would be folded twice, once from the log and once as unsent.)
           const own=target.sync.pending.findIndex(o=>o.id===rec.id);if(own>=0)target.sync.pending.splice(own,1);
+          // After a restore of older local storage this phone's own earlier records come back: never reuse their counters.
+          if(p.o&&target.sync.out&&p.o.s===target.sync.out.s&&p.o.n>target.sync.out.n)target.sync.out.n=p.o.n;
           target.sync.log.push({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p});markSeen(target.sync,rec.id);changed.add(target);
         }
         // A child the Worker reports deleted, without a tombstone this phone could verify, stays here as a local copy.

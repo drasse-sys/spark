@@ -554,7 +554,9 @@ async function replayedReview(clientPatch){
 }
 test('negative control: without the seen-id check a replayed record is applied twice',async()=>{
   assert.equal(await replayedReview(),1);
-  assert.equal(await replayedReview(cut('if(incorporated(target.sync,rec))continue;')),2);
+  const noIngest=cut('if(incorporated(target.sync,rec))continue;'),noIdentity=cut('if(!firstUse(st,p))return st;');
+  assert.equal(await replayedReview(noIngest),1,'the operation identity in the fold is a second, independent defence');
+  assert.equal(await replayedReview(src=>noIdentity(noIngest(src))),2,'with both removed the replay counts twice');
 });
 async function fastClockCredit(clientPatch){
   const {clock,A,B}=await pairWith({clientPatch,name:'nc-ck'});
@@ -664,19 +666,21 @@ test('re-review HIGH-1: a stale phone from an older generation never re-shares a
   B2.online=true;assert.ok((await B2.engine.join({key:k1.key})).ok);await B2.sync();
   assert.ok(B2.kid('Ada').fork);assert.equal(B2.engine.shareAll(),0);await A2.sync();assert.equal(A2.kid('Ada'),undefined);
 });
-test('re-review HIGH-2: a full family can still reset; deleted ids are bounded and never fill the child quota',async()=>{
+test('re-review HIGH-2: a full family can still reset; deleted ids never fill the child quota (and are kept for the whole generation, F4)',async()=>{
   const {fam,A}=await pair('rr2');
   for(let i=0;i<20;i++){const k=blankKid('Barn'+i);A.kids.push(k);A.practice(k,'add1');A.engine.share(k);}A.saveKids();
   assert.equal((await A.sync()).code,'quota');
   const r=await A.engine.reset({code:fam.code});assert.ok(r.ok,'reset is the way out');
-  // 150 deletions over time: ids and tombstones stay bounded at 100, and sharing still works.
+  // 150 deletions in one generation: every deleted id is still remembered (F4: none is pruned while the generation lasts),
+  // they do not count toward the 20 active children, and sharing still works.
   const famId=(await db.prepare('SELECT family_id AS f FROM sync_families WHERE gen=?1').bind(A.engine.state().gen).first()).f;
   for(let i=0;i<150;i++)await db.prepare("INSERT INTO sync_children (family_id, child_id, status, created_at, deleted_at) VALUES (?1, ?2, 'deleted', 1, ?3)").bind(famId,'Z'+String(i).padStart(20,'0')+'A',i).run();
   await A.sync();
   for(const k of A.kids.filter(x=>x.sync&&!x.sync.pending.length).slice(0,2))assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:k}),{ok:true});
-  const n=(await db.prepare("SELECT COUNT(*) AS n FROM sync_children WHERE family_id=?1 AND status='deleted'").bind(famId).first()).n;assert.equal(n,100);
+  const n=(await db.prepare("SELECT COUNT(*) AS n FROM sync_children WHERE family_id=?1 AND status='deleted'").bind(famId).first()).n;assert.equal(n,152);
+  const t=(await db.prepare("SELECT COUNT(*) AS n FROM sync_tombstones WHERE family_id=?1").bind(famId).first()).n;assert.ok(t<=100,'tombstones (for re-joining phones) stay bounded');
   const fresh=blankKid('Ny');A.kids.push(fresh);A.practice(fresh,'add1');A.engine.share(fresh);A.saveKids();await A.sync();
-  assert.equal(fresh.sync.pending.length,0,'shared despite 100 deleted ids');
+  assert.equal(fresh.sync.pending.length,0,'shared despite 152 deleted ids');
 });
 test('re-review MEDIUM: one far-future review does not pin a word in the future',()=>{
   const m=L.empty();L.addWord(m,{id:'w',word:'hus',meaning:'x',t:0});
