@@ -83,7 +83,9 @@
   // `r.t` is the review time; `mayDelay:false` caps delay credit (SYNC1) exactly as in `event`.
   function reviewWord(memory,r){
     const w=(memory.items||[]).find(w=>w.id===r?.wordId);if(!w||!Number.isSafeInteger(r.t))return null;
-    const now=r.t,s=r.s,delayed=r.mayDelay!==false&&!!w.lastAt&&now-w.lastAt>=DAY;
+    // A review older than the last one (a clock step back, or a merged late record) is placed at the last review time,
+    // as `event` clamps skill evidence: the last-review anchor never moves back, so no later review gains delay credit.
+    const now=Math.max(r.t,w.lastAt||0),s=r.s,delayed=r.mayDelay!==false&&!!w.lastAt&&now-w.lastAt>=DAY;
     if(r.ok&&s<=1&&r.c!=='gjetter'&&delayed)w.box=Math.min(5,(w.box||1)+1);else if(!r.ok||s>=3)w.box=Math.max(1,(w.box||1)-1);
     w.box ||=1;w.lastAt=now;w.due=now+SPACING[w.box-1]*DAY;
     w.ev ||= [];w.ev.push({t:now,s,ok:r.ok,delayed});w.ev=w.ev.slice(-8);

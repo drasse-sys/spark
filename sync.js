@@ -59,8 +59,9 @@
   // the Worker cannot move a payload to another child, kind or id, or replay it into a reset family.
   const aad=(gen,child,kind,id)=>enc.encode([PROTOCOL,gen,child,kind,id].join('\n'));
   async function seal(subtle,random,key,gen,rec,payload){
-    let text=JSON.stringify(payload);text+=' '.repeat((256-text.length%256)%256);// length buckets of 256 bytes
-    const iv=random(12),ct=await subtle.encrypt({name:'AES-GCM',iv,additionalData:aad(gen,rec.child,rec.kind,rec.id)},key,enc.encode(text));
+    // Padded with spaces to a multiple of 256 UTF-8 bytes (what is encrypted), so lengths reveal only the bucket.
+    const body=enc.encode(JSON.stringify(payload)),text=new Uint8Array(Math.max(1,Math.ceil(body.length/256))*256).fill(32);text.set(body);
+    const iv=random(12),ct=await subtle.encrypt({name:'AES-GCM',iv,additionalData:aad(gen,rec.child,rec.kind,rec.id)},key,text);
     return {id:rec.id,child:rec.child,kind:rec.kind,iv:b64url(iv),ct:b64url(ct)};
   }
   async function open(subtle,key,gen,rec){
@@ -103,7 +104,7 @@
     if(kind!=='op'||!Object.hasOwn(OPS,p.type)||!exactKeys(p,['type','v','t','after',...OPS[p.type]]))return null;
     switch(p.type){
       case 'skill':{const e=skillInput(p.e);return e&&Object.hasOwn(L.CATALOG,p.skill)&&typeof p.d==='boolean'?{...head,skill:p.skill,e,d:p.d}:null;}
-      case 'word-add':{const w=p.word;return exactKeys(w,['id','word','meaning'])&&typeof w.id==='string'&&WORD_ID.test(w.id)&&str(w.word,1,60)&&str(w.meaning,1,160)?{...head,word:{id:w.id,word:w.word,meaning:w.meaning}}:null;}
+      case 'word-add':{const w=p.word;return exactKeys(w,['id','word','meaning'])&&typeof w.id==='string'&&WORD_ID.test(w.id)&&str(w.word,1,60)&&str(w.meaning,0,160)?{...head,word:{id:w.id,word:w.word,meaning:w.meaning}}:null;}
       case 'word-review':return typeof p.wordId==='string'&&WORD_ID.test(p.wordId)&&Number.isInteger(p.s)&&p.s>=0&&p.s<=4&&typeof p.ok==='boolean'&&(p.c===''||CONFIDENCE.includes(p.c))&&typeof p.d==='boolean'?{...head,wordId:p.wordId,s:p.s,ok:p.ok,c:p.c,d:p.d}:null;
       case 'word-remove':return Array.isArray(p.ids)&&p.ids.length>=1&&p.ids.length<=60&&p.ids.every(id=>typeof id==='string'&&WORD_ID.test(id))?{...head,ids:p.ids.slice()}:null;
       case 'helped':return Object.hasOwn(L.CATALOG,p.skill)&&HELPED.includes(p.value)?{...head,skill:p.skill,value:p.value}:null;
@@ -132,6 +133,8 @@
   const orderKey=r=>r.kind==='base'?-Infinity:Math.max(when(r.p,r).t,r.at-WINDOW);
   // Ties (same effective time) follow the Worker's sequence, which keeps each phone's own order; the id breaks the rest.
   function order(a,b){const x=orderKey(a),y=orderKey(b);return x<y?-1:x>y?1:a.seq!==b.seq?a.seq-b.seq:a.id<b.id?-1:a.id>b.id?1:0;}
+  // Keys carry a prefix, so no word id (e.g. "__proto__") can address the object's prototype.
+  const alias=st=>st.meta.alias ||= {};
   const later=(t,id,cur)=>!cur||t>cur.t||t===cur.t&&id>cur.id;
   // One record applied to a fold state {learning, meta:{profile, helped}}; null until the base arrives.
   function apply(st,rec,p){
@@ -142,15 +145,16 @@
       if(Number.isSafeInteger(rec.at))learning=L.trust(L.normalizeMemory(learning),rec.at,rec.at);
       const w=when(p,rec),helped={};
       for(const [skill,r] of Object.entries(learning.skills))if(r.helped)helped[skill]={t:w.t,id:rec.id};
-      return {learning,meta:{profile:{...p.profile,t:w.t,id:rec.id},helped}};
+      return {learning,meta:{profile:{...p.profile,t:w.t,id:rec.id},helped,alias:{}}};
     }
     if(!st)return st;
     const w=when(p,rec),m=st.learning;
     switch(p.type){
       case 'skill':L.event(m,p.skill,{...p.e,t:w.t,mayDelay:w.delay&&p.d},w.t);break;
-      case 'word-add':L.addWord(m,{...p.word,sentence:'',t:w.t});break;
-      case 'word-review':L.reviewWord(m,{wordId:p.wordId,t:w.t,s:p.s,ok:p.ok,c:p.c,mayDelay:w.delay&&p.d});break;
-      case 'word-remove':{const ids=new Set(p.ids);m.items=m.items.filter(x=>!ids.has(x.id));break;}
+      // The same word added on two phones is one word: the later id becomes an alias, so its reviews still count.
+      case 'word-add':{if(L.addWord(m,{...p.word,sentence:'',t:w.t}))break;const same=m.items.find(x=>x.word===p.word.word&&x.meaning===p.word.meaning);if(same&&same.id!==p.word.id)alias(st)['w:'+p.word.id]=same.id;break;}
+      case 'word-review':L.reviewWord(m,{wordId:alias(st)['w:'+p.wordId]||p.wordId,t:w.t,s:p.s,ok:p.ok,c:p.c,mayDelay:w.delay&&p.d});break;
+      case 'word-remove':{const ids=new Set(p.ids.map(id=>alias(st)['w:'+id]||id));m.items=m.items.filter(x=>!ids.has(x.id));break;}
       case 'helped':if(m.skills[p.skill]&&later(w.t,rec.id,st.meta.helped[p.skill])){m.skills[p.skill].helped=p.value;st.meta.helped[p.skill]={t:w.t,id:rec.id};}break;
       case 'session':if(!m.sessions.some(s=>s.id===p.session.id)){m.sessions.push(clone(p.session));m.sessions=m.sessions.slice(-L.LIMITS.sessions);}break;
       case 'profile':if(later(w.t,rec.id,st.meta.profile))st.meta.profile={...p.profile,t:w.t,id:rec.id};break;
@@ -191,8 +195,8 @@
   // Local profile and learning as the child's synced state. Fields that never sync stay as they were on this phone.
   function materialize(kid){
     const s=kid.sync;if(!s)return false;const st=fold(s);if(!st)return false;
-    const old=kid.learning||{},sentences=new Map((old.items||[]).map(w=>[w.id,w.sentence])),inter=new Map((old.sessions||[]).map(x=>[x.id,x.interactions]));
-    for(const w of st.learning.items)w.sentence=sentences.get(w.id)||'';
+    const old=kid.learning||{},sentences=new Map((old.items||[]).flatMap(w=>[[w.id,w.sentence],[w.word+'\n'+w.meaning,w.sentence]])),inter=new Map((old.sessions||[]).map(x=>[x.id,x.interactions]));
+    for(const w of st.learning.items)w.sentence=sentences.get(w.id)||sentences.get(w.word+'\n'+w.meaning)||'';
     for(const x of st.learning.sessions)x.interactions=Array.isArray(inter.get(x.id))?inter.get(x.id):[];
     const {name,age,interests,readAloud}=st.meta.profile;
     Object.assign(kid,{name,age,interests,readAloud,learning:st.learning});s.profile={name,age,interests,readAloud};
@@ -233,7 +237,9 @@
       // A phone's own changes do not go back in time across small clock steps, so causal order survives the merge.
       // A step back of more than CLOCK_SKEW is a corrected clock: the earlier reading is not carried forward.
       const t=s.lastT>payload.t&&s.lastT-payload.t<=SKEW?s.lastT:payload.t,kind='op',p=checkPayload(kind,{v:1,after:s.serverTime,...payload,t},kid.id);
-      if(!p||kid.sync.pending.length>=LIMITS.pending)return false;
+      // A change that cannot be queued must not be lost at the next fold: the child (which already holds the change
+      // locally) leaves the family log and stays here as a local copy.
+      if(!p||kid.sync.pending.length>=LIMITS.pending){detach(kid);return false;}
       kid.sync.pending.push({id:newId(),kind,p});s.lastT=t;save(s);return true;
     }
     function profileChanged(kid){
@@ -254,7 +260,10 @@
     }
     // Keeps the data on this phone as an unshared profile with a new identity (after a reset, a server-side deletion
     // that could not be verified, or an inconsistency). Nothing is lost; the parent decides what to do with it.
-    function fork(kid){materialize(kid);delete kid.sync;delete kid.id;kid.fork=true;}
+    function detach(kid){delete kid.sync;delete kid.id;kid.fork=true;}
+    function fork(kid){mat(kid);detach(kid);}
+    // Stored sync data that cannot be folded (corrupted beyond the load-time shape check) costs only this child's sharing.
+    function mat(kid){try{return materialize(kid);}catch{detach(kid);return false;}}
     function shareAll(){let n=0;for(const kid of d.kids())if(share(kid))n++;return n;}
     async function create({code}){
       const raw=d.random(16),text=await keyText(d.subtle,raw),k=await deriveKeys(d.subtle,raw);
@@ -270,8 +279,17 @@
       return activate(text,k,r.data);
     }
     // Generation change (first enrolment, re-join after a reset): previously shared children become local copies.
-    function activate(text,k,data){
+    async function activate(text,k,data){
       const old=state();
+      if(old.enabled&&old.gen!==data.gen&&Array.isArray(data.tombstones)){
+        // Children deleted from the family in this phone's previous generation, verified with the previous key, are
+        // removed rather than kept as copies: a reset never brings a deleted child back.
+        let prev=null;try{prev=await keys(old);}catch{}
+        if(prev)for(const t of data.tombstones){
+          const kid=t&&t.gen===old.gen?d.kids().find(x=>x.sync&&x.id===t.child):null;if(!kid)continue;
+          if(await open(d.subtle,prev.encKey,old.gen,{id:t.id,child:t.child,kind:'tombstone',iv:t.iv,ct:t.ct}))d.removeKid(kid);
+        }
+      }
       for(const kid of shared())if(kid.sync&&old.gen!==data.gen)fork(kid);
       keyCache={text,...k};
       // Same generation (a re-join): what this phone already applied, removed or saw deleted stays valid.
@@ -281,11 +299,14 @@
       return {ok:true,key:text};
     }
     async function reset({code}){
+      // Apply every deletion this phone can still receive first, so its re-shared children are only living ones.
+      if(state().enabled){const r=await sync();if(!r.ok&&!['rejoin','revoked'].includes(r.code))return {ok:false,code:'sync_first'};}
       const raw=d.random(16),text=await keyText(d.subtle,raw),k=await deriveKeys(d.subtle,raw);
       const r=await d.request('/sync/admin',{v:1,op:'reset',code:String(code||''),proof:k.proof});
       if(r.status!==200||!ID.test(r.data?.gen))return {ok:false,code:r.data?.code||'error',error:r.data?.error||''};
-      const was=shared();const result=activate(text,k,r.data);
-      if(result.ok){for(const kid of was)share(kid);d.saveKids();}
+      const before=shared(),result=await activate(text,k,r.data);
+      // Children still here (not removed by a verified tombstone) are shared again under new ids.
+      if(result.ok){for(const kid of before)if(d.kids().includes(kid))share(kid);d.saveKids();}
       return result;
     }
     function hide(kid){
@@ -311,6 +332,7 @@
     const STOP={401:'auth',403:'revoked',409:'rejoin',429:'rate',507:'quota'};
     function stop(r){if(r.status===403&&r.data?.code==='not_enrolled')return fail('rejoin');return fail(STOP[r.status]||'unavailable');}
     async function push(s,k){
+      let quota=false;
       for(const kid of shared()){
         // A child the Worker reported deleted waits for its tombstone (pull) and is never pushed again.
         while(kid.sync&&kid.sync.pending.length&&!kid.sync.blocked){
@@ -326,22 +348,25 @@
           if(oversize&&!batch.length){fork(kid);if(!d.saveKids())return fail('storage');break;}
           const r=await d.request('/sync/push',{v:1,gen:s.gen,clientNow:d.now(),records:batch});
           if(r.status!==200||!Array.isArray(r.data?.results)||r.data.results.length!==batch.length)return stop(r);
+          if(r.data.results.some((res,i)=>res?.id!==batch[i].id))return fail('unavailable');
           let retry=false,lost=false,blocked=false;
+          // Family child limit reached: the new child waits (its ops answer child_unknown because its base was refused).
+          const full=r.data.results.some(res=>res.status==='quota');if(full)quota=true;
           r.data.results.forEach((res,i)=>{
-            const op=kid.sync?.pending.find(o=>o.id===batch[i].id);if(!op||res?.id!==op.id)return;
+            const op=kid.sync?.pending.find(o=>o.id===batch[i].id);if(!op)return;
             if(['ok','dup'].includes(res.status)&&Number.isSafeInteger(res.seq)&&Number.isSafeInteger(res.at)&&[0,1].includes(res.ck)){
               kid.sync.pending=kid.sync.pending.filter(o=>o!==op);
               if(!seen(kid.sync,op.id)){kid.sync.log.push({seq:res.seq,id:op.id,kind:op.kind,at:res.at,ck:res.ck,p:op.p});markSeen(kid.sync,op.id);}
             }else if(res.status==='child_deleted')blocked=true;
-            else if(['child_unknown','child_exists'].includes(res.status))lost=true;
+            else if(res.status==='child_exists'||res.status==='child_unknown'&&!full)lost=true;
             else retry=true;
           });
-          if(lost)fork(kid);else{if(blocked)kid.sync.blocked=true;materialize(kid);}
+          if(lost)fork(kid);else{if(blocked)kid.sync.blocked=true;mat(kid);}
           if(!d.saveKids())return fail('storage');
           if(retry||blocked)break;
         }
       }
-      return null;
+      return quota?fail('quota'):null;
     }
     async function pull(s,k){
       for(let page=0;page<LIMITS.pullPages;page++){
@@ -370,13 +395,13 @@
           const deleted=new Set(data.children.filter(c=>c&&c.status==='deleted').map(c=>c.child));
           for(const kid of shared())if(deleted.has(kid.id)&&!s.deleted.includes(kid.id))fork(kid);
         }
-        for(const kid of changed)if(kid.sync)materialize(kid);
+        for(const kid of changed)if(kid.sync)mat(kid);
         if(!d.saveKids())return fail('storage');
         s.cursor=data.next;s.serverTime=data.serverNow;
         if(!save(s))return fail('storage');
         if(!data.more){
           const horizon=data.serverNow-WINDOW-SKEW;
-          for(const kid of shared())checkpoint(kid.sync,horizon);
+          for(const kid of shared()){try{checkpoint(kid.sync,horizon);}catch{detach(kid);}}
           d.saveKids();return null;
         }
       }

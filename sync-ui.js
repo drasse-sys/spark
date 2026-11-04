@@ -2,9 +2,10 @@
    connects them to SparkSync. Nothing here runs unless a parent turned sync on (or the `spark_sync_lab` opt-in is set),
    the phone is paired with the Worker this build ships with, and that Worker has sync configured.
    Sync never blocks homework: it runs only outside an open chat, in the background, and every failure is a status line. */
-const SY=SparkSync,SYNC_STATE='spark_sync';
+// If sync.js failed to load, sync stays off and the app works as before (see the fallbacks in spark.html).
+const SY=globalThis.SparkSync,SYNC_STATE='spark_sync';
 let syncEngine=null,syncTimer=null,syncDevicesView='';
-function syncVisible(){return store.getItem('spark_sync_lab')==='1'||!!store.getItem(SYNC_STATE);}
+function syncVisible(){return !!SY&&(store.getItem('spark_sync_lab')==='1'||!!store.getItem(SYNC_STATE));}
 // Same trust root as TR1: only the Worker built into the app, never the ⚙️ address, and only with a token from it.
 function syncReachable(){return paired()&&serverUrl===DEFAULT_SERVER_URL;}
 async function syncRequest(path,body){
@@ -19,10 +20,11 @@ function syncEngineGet(){
     kids:()=>kids,saveKids,addKid:syncAddKid,removeKid:syncRemoveKid,newKid:()=>blankKid('')
   });
 }
-const syncOn=()=>!!store.getItem(SYNC_STATE)&&syncEngineGet().state().enabled;
+const syncOn=()=>!!SY&&!!store.getItem(SYNC_STATE)&&syncEngineGet().state().enabled;
 // Load-time check of every child's sync data. Malformed data never deletes anything: the child stays as a local copy.
 function syncInitKids(){
   for(const k of kids){
+    if(!SY){if(k.sync){delete k.sync;delete k.id;k.fork=true;}continue;}
     if(!k.sync)continue;
     const s=SY.ID.test(k.id||'')?SY.normalizeSync(k.sync):null;
     if(s)k.sync=s;else{delete k.sync;delete k.id;k.fork=true;}
@@ -58,8 +60,9 @@ function syncSoon(delay=800){
 }
 async function syncRun(){
   if(!syncOn())return;
-  // Never during homework or a provider call: try again later.
-  if(busy||view==='chat'){syncSoon(30000);return;}
+  // Never during homework or a provider call, and never under the open settings form (a background change there could be
+  // written back as a stale edit by «Lagre»). Buttons on the settings page sync explicitly and re-render the form.
+  if(busy||view==='chat'||view==='setup'){syncSoon(30000);return;}
   const before=JSON.stringify(kids.map(k=>[k.id,k.name]));
   await syncEngineGet().sync().catch(()=>null);
   if(view==='start'&&!busy&&JSON.stringify(kids.map(k=>[k.id,k.name]))!==before)render();
@@ -103,7 +106,7 @@ function syncHTML(){
     ${s.hidden.length?'<button class="qb" id="syncUnhide">Hent fjernede barn tilbake hit</button>':''}
     <button class="qb" id="syncReset">Start på nytt med ny nøkkel</button></section>`;
 }
-const SYNC_ERRORS={family_code:'Feil familiekode.',family_exists:'Synkronisering er allerede startet. Bruk nøkkelen fra en annen telefon.',no_family:'Synkronisering er ikke startet ennå. Start den på én telefon først.',key:'Feil synkroniseringsnøkkel.',key_format:'Nøkkelen er skrevet feil. Sjekk alle tegnene.',revoked:'Denne telefonen er fjernet fra familiens synkronisering.',storage:'Telefonen har ikke plass til å lagre.',pending:'Synkroniser først, så ingen endringer går tapt.',device_unknown:'Ukjent enhet.',child_unknown:'Barnet finnes ikke i familiens synkronisering.'};
+const SYNC_ERRORS={sync_first:'Synkroniser først (telefonen må være på nett), så ingen sletting går tapt.',family_code:'Feil familiekode.',family_exists:'Synkronisering er allerede startet. Bruk nøkkelen fra en annen telefon.',no_family:'Synkronisering er ikke startet ennå. Start den på én telefon først.',key:'Feil synkroniseringsnøkkel.',key_format:'Nøkkelen er skrevet feil. Sjekk alle tegnene.',revoked:'Denne telefonen er fjernet fra familiens synkronisering.',storage:'Telefonen har ikke plass til å lagre.',pending:'Synkroniser først, så ingen endringer går tapt.',device_unknown:'Ukjent enhet.',child_unknown:'Barnet finnes ikke i familiens synkronisering.'};
 const syncError=r=>SYNC_ERRORS[r?.code]||r?.error||'Det gikk ikke. Prøv igjen senere.';
 async function syncGuard(button,fn){if(busy)return;busy=true;button.disabled=true;try{await fn();}catch{alert('Det gikk ikke. Sjekk forbindelsen og prøv igjen.');}finally{busy=false;render();}}
 function bindSync(){
@@ -128,8 +131,9 @@ function bindSync(){
   if($('syncNow'))$('syncNow').onclick=ev=>syncGuard(ev.currentTarget,()=>e.sync());
   if($('syncShare'))$('syncShare').onclick=ev=>syncGuard(ev.currentTarget,async()=>{if(!e.share(kid())){alert('Et tomt barn uten navn deles ikke.');return;}if(!saveKids()){alert(SYNC_ERRORS.storage);return;}await e.sync();});
   if($('syncHide'))$('syncHide').onclick=ev=>syncGuard(ev.currentTarget,async()=>{
-    if(!confirm('Fjerne '+(kid().name||'barnet')+' fra denne telefonen? Barnet beholdes på de andre telefonene. Samtaler som bare finnes her, slettes.'))return;
-    await e.sync();const r=e.hide(kid());if(!r.ok)alert(syncError(r));
+    const k=kid();if(!confirm('Fjerne '+(k.name||'barnet')+' fra denne telefonen? Barnet beholdes på de andre telefonene. Samtaler som bare finnes her, slettes.'))return;
+    // The confirmed child, not whatever is active after the round (a round can add or remove children).
+    await e.sync();if(!kids.includes(k)||!k.sync)return;const r=e.hide(k);if(!r.ok)alert(syncError(r));
   });
   if($('syncUnhide'))$('syncUnhide').onclick=ev=>syncGuard(ev.currentTarget,async()=>{e.unhide();await e.sync();});
   if($('syncDeleteChild'))$('syncDeleteChild').onclick=ev=>syncGuard(ev.currentTarget,async()=>{
@@ -160,8 +164,11 @@ async function syncResetChildLearning(){
   try{
     const e=syncEngineGet(),profile={name:k.name,age:k.age,interests:k.interests,readAloud:!!k.readAloud};
     const r=await e.deleteChild({code,kid:k});if(!r.ok){alert(syncError(r));return;}
-    const fresh={...blankKid(profile.name),...profile};kids.push(fresh);active=kids.length-1;
-    e.share(fresh);saveKids();await e.sync();
+    const fresh={...blankKid(profile.name),...profile};
+    // Removing the only child left an empty starter profile: the fresh child takes its place.
+    if(kids.length===1&&SY.blank(kids[0])&&!store.getItem(sessionKey(0)))kids[0]=fresh;else kids.push(fresh);active=kids.indexOf(fresh);
+    if(!e.share(fresh))alert('Historikken er slettet på alle telefonene. Barnet uten navn blir bare på denne telefonen; del det igjen når det har fått navn.');
+    saveKids();await e.sync();
   }catch{alert('Det gikk ikke. Sjekk forbindelsen og prøv igjen.');}
   finally{busy=false;render();}
 }

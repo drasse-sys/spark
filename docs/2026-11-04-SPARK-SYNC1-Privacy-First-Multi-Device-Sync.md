@@ -40,11 +40,11 @@ A = sync (end-to-end encrypted), B = device-local, C = never to the server, D = 
 
 | Threat | V1 outcome |
 |---|---|
-| **Stolen phone** | The thief has the local data (already true today), the device token and the sync key. Until the parent revokes the phone, it can still read the family's synced data and write evidence. It **cannot** revoke other phones, delete children or reset the family: those need the family code, which phones do not store. After revocation it gets 403 and cannot re-enrol (revocation is permanent for that device id), and re-pairing needs the family code. There is no remote wipe. To also make the stolen key useless against a future server leak, the parent rotates it with "Start på nytt med ny nøkkel". |
-| **Stolen device token only** | It cannot enrol for sync without the family key: enrolling needs a membership proof derived from the key. If the token belongs to an already enrolled phone, the thief can download ciphertext and upload records. Uploaded records that do not authenticate are skipped by every phone. Revoke the phone. |
+| **Stolen phone** | The thief has the local data (already true today), the device token and the sync key. Parent operations are rate-limited per device, so the stolen phone cannot use up the parent's budget and block the revocation. Until the parent revokes the phone, it can still read the family's synced data and write evidence. It **cannot** revoke other phones, delete children or reset the family: those need the family code, which phones do not store. After revocation it gets 403 and cannot re-enrol (revocation is permanent for that device id), and re-pairing needs the family code. There is no remote wipe. To also make the stolen key useless against a future server leak, the parent rotates it with "Start på nytt med ny nøkkel". |
+| **Stolen device token only** | It cannot enrol for sync without the family key: enrolling needs a membership proof derived from the key. If the token belongs to an already enrolled phone, the thief can download ciphertext and upload records. Uploaded records that do not authenticate are skipped by every phone. Until the phone is revoked, though, such junk uses the family's quotas: active children (20), child rows (100, which include deleted children and are never freed), and records/bytes. Revoke the phone. |
 | **Family code disclosed** | The holder can pair a new device, revoke phones, delete the server copy of a child, and reset the family's server data. These are availability attacks. They **cannot** read synced data, because the code gives no key. They **cannot** delete local data: a tombstone must authenticate under the family key, and phones keep an unverifiable deletion as a local copy. Rotate `FAMILY_CODE`. |
 | **Malicious paired device with the key** | It is inside the trust boundary, as with TR1. It can write arbitrary evidence and inflate mastery, and it can edit profiles. It cannot delete or revoke without the family code. |
-| **Worker compromise** (code, secrets, D1) | Exposed: that a family exists; device ids, enrolment dates and last-seen days; the number of children; record counts, kinds (`base`/`op`/`tombstone`) and Worker receive times (which show when phones uploaded); ciphertext sizes in 256-byte buckets; the SHA-256 of the membership proof. An active attacker also sees membership proofs at enrolment. A proof is an HKDF output: it does not reveal the encryption key. **Not exposed:** names, ages, interests, answers, skills, words, session summaries. The attacker can withhold, delete or re-sequence records (availability and consistency) and can mint tokens. It cannot forge, modify, swap or replay a record into a valid state (§6). |
+| **Worker compromise** (code, secrets, D1) | **Exposed:**<br>• that a family exists;<br>• device ids, enrolment dates and last-seen days;<br>• child ids and the number of children;<br>• when each child was shared and deleted;<br>• for every record: its child id, kind (`base`/`op`/`tombstone`) and Worker receive time — a per-child timeline of when phones uploaded;<br>• the clock-agreement flag;<br>• ciphertext sizes, rounded up to 256 encrypted bytes;<br>• the SHA-256 of the membership proof;<br>• tombstone ciphertexts of earlier generations.<br>An active attacker also sees each phone's clock reading (`clientNow`) and membership proofs at enrolment. A proof is an HKDF output: it does not reveal the encryption key.<br>**Not exposed:** names, ages, interests, answers, skills, words, session summaries.<br>**What it can do:** withhold or delete records (availability) and mint tokens. Receive time, clock flag and sequence are not authenticated, so it can also **re-order and re-time records**. That changes derived mastery (box, delay credit, checkpoints) within the evidence phones actually wrote, and it can raise it: the review reproduced box 1 → 4. **What it cannot do:** read payloads, or forge, alter or move a payload to another child, kind, id or generation (AES-GCM associated data). |
 | **D1 read compromise** | As above, without the active capabilities. |
 | **Rollback or replay of old state** | A record id already seen by a phone is ignored. A payload moved to another id, child, kind or generation fails AES-GCM authentication. A phone never discards local data because the server sent less. An older server state cannot shrink a phone's state, because records are only added. A brand-new phone can be served a stale but authentic subset. Without client-signed heads this is not detectable (§11). |
 | **Forged client** | The same as a malicious device: it is inside the trust boundary. All inputs are schema-checked on both sides, so it cannot inject properties or crash other phones. |
@@ -59,12 +59,13 @@ A = sync (end-to-end encrypted), B = device-local, C = never to the server, D = 
 - Confidentiality of synced learning content against the Worker, D1, Cloudflare account access and network observers, provided the phones and the app code are not compromised.
 - Integrity and authenticity of every synced record against anyone without the family key, including the Worker.
 - No family-wide destructive action without the family code. No destruction of local data by anyone without the key.
-- Convergence: phones holding the same records compute byte-identical state (property-tested).
-- No mastery inflation from merging. No delay credit beyond what the recording phone granted.
+- Convergence: phones holding the same records, with the same Worker metadata, compute identical state (property-tested).
+- **With an honest relay:** no mastery inflation from merging, and no delay credit beyond what the recording phone granted. A compromised Worker can re-time records and so change derived mastery. It cannot change evidence content.
 
 ### What V1 does not protect
 - A phone or a key holder acting maliciously. The client is the trust boundary, exactly as in TR1.
 - Availability against a compromised Worker or a family-code holder.
+- The integrity of *derived* mastery against a compromised Worker, which can re-order records (see the table above).
 - Detection of withheld records on a brand-new phone.
 - Metadata: activity timing, counts and sizes are visible to the Worker.
 - Compromise of the GitHub Pages app code. Malicious app code could exfiltrate the key.
@@ -114,7 +115,7 @@ Why this tradeoff is acceptable: the extra burden is one 28-character code per e
 - **Child identity:** a random 128-bit id, assigned when a parent shares the child. It is persisted in the same atomic `spark_kids` write as the share and never changes afterwards. Display names are never identities. Existing local children get their id at the moment they are shared. Unshared children keep working exactly as before and need no id.
 - **Discovery on a new phone:** after joining, the phone downloads the family log. Each child begins with its encrypted base record, and that record creates the child on the phone. If the phone only has the empty starter profile, the first family child replaces it.
 - **Is the family code enough to join?** No. Pairing needs the family code, and sync membership needs the key. Each covers what the other cannot.
-- **Revocation:** done by any enrolled phone together with the family code. It is permanent per device id. A revoked phone keeps its local data and gets a clear status. It keeps chat access, which is governed by the existing token and `REVOKE_BEFORE` (§17).
+- **Revocation:** done by any enrolled phone together with the family code. It is permanent per device id, including across a family reset. A revoked phone keeps its local data and gets a clear status. It keeps chat access, which is governed by the existing token and `REVOKE_BEFORE` (§17).
 - **Trust root:** sync talks only to `DEFAULT_SERVER_URL`, the Worker the app build ships with. It runs only when the phone is paired with that Worker (as TR1 signing does), with `redirect:'error'`. The ⚙️ server address is never used. The server is a relay, not an authority: integrity comes from the key.
 
 ## 7. Merge / convergence model
@@ -134,7 +135,7 @@ A child's state is: its base, then its other records sorted by `(orderKey, Worke
 ### 7.3 Field classification
 | Behaviour | Fields |
 |---|---|
-| **Append / union** (immutable, deduplicated by record id, and by evidence id in `L.event`) | skill evidence and observations, word reviews, session summaries (by session id), word additions (by word + meaning), tombstones |
+| **Append / union** (immutable, deduplicated by record id, and by evidence id in `L.event`) | skill evidence and observations, word reviews, session summaries (by session id), tombstones. Word additions merge by word + meaning: when two phones add the same word, the later id becomes an alias, so its reviews and removals still apply. Residual: a merge that takes the family past the 60-word list limit drops the words beyond it, together with their reviews. |
 | **Monotonic** | Worker head sequence, device status (active → revoked), child status (active → deleted), phone cursor, a phone's own op times (non-decreasing within one day of clock steps) |
 | **Derived / recomputed** | box, due, independentAt, firstColdAt, retainedAt, lastAt, lastSession, seenObs, totals, last-8 windows, state labels, word box/due/lastAt |
 | **Last-writer-wins (safe)** | profile fields and `helped`, by (effective time, record id). No evidence depends on them. |
@@ -155,7 +156,7 @@ Every property below is covered by tests. Idempotent: replay is ignored and a re
 | Clear transcript / history locally | local | Unchanged. Transcripts are never synced. | n/a |
 | Delete synced learning data (keep child) | family code | "Slett all historikk" on a shared child: delete from family, then share a fresh, empty child with the same profile under a new id. | As above: the old id is a tombstone. |
 | Revoke a device | family code | Registry row → `revoked` (permanent for that id). | It gets 403 and keeps local data. Re-enrolling the same id is refused. |
-| Reset family / rotate key | family code | Deletes all of the family's Worker data and starts a new generation. | It gets 409 and must enter the new key. Its shared children become local copies, so nothing is lost. |
+| Reset family / rotate key | family code | The resetting phone first completes a sync round, so every deletion it can receive is applied before it re-shares its children. If it cannot sync, it refuses (`sync_first`). The Worker then deletes the family's records, active children and active enrolments, and starts a new generation. Kept: revocations, deleted child ids, and tombstones of every generation. | It gets 409 and must enter the new key. On re-joining it receives the old tombstones and verifies them with its previous key: children deleted before the reset are removed. Other shared children become local copies, so nothing is lost. |
 
 Tombstones are bounded: one row per deleted child, and at most 100 child rows per family.
 
@@ -174,7 +175,7 @@ Tombstones are bounded: one row per deleted child, and at most 100 child rows pe
   Per-record results are `ok`, `dup`, `child_deleted`, `child_unknown`, `child_exists`, `quota` or `retry`. Responses never contain the token. Logs are content-free (`{evt:'sync_failure', route, t}`). Quotas: 20 active children, 100 child rows, 200,000 records and 256 MB per family.
 - `backend/wrangler.toml`: a new `[env.sync-lab]` (separate Worker name, placeholder D1 id, `SYNC_LIMITER` 120/min). The default (production) environment is unchanged.
 - `sync.js` (client, pure core plus injected engine): key codec, HKDF/AES-GCM, strict payload schema, fold, checkpoint, push/pull with retry and resume, share/fork/hide/delete/revoke/reset.
-- `sync-ui.js`: the settings section (lab opt-in `spark_sync_lab=1` or sync already on), background rounds (on start, on reconnect, every 5 minutes, after finishing homework; never during an open chat or a provider call), index-safe child removal, and family-wide learning reset.
+- `sync-ui.js`: the settings section (lab opt-in `spark_sync_lab=1` or sync already on), background rounds (on start, on reconnect, every 5 minutes, after finishing homework), index-safe child removal, and family-wide learning reset. A background round never *starts* during an open chat, a provider call or on the settings page. On the settings page a background change could otherwise be written back by «Lagre» as a stale edit, so only the page's own buttons sync there, and they re-render the form. A round that has already started can finish after the child opens homework. Replacing learning state then is harmless. A family deletion arriving at that moment ends the open session view. If `sync.js`/`sync-ui.js` fail to load, no-op fallbacks in `spark.html` keep the app working as before (tested).
 - `learning.js`: `L.addWord` / `L.reviewWord` (shared by the UI and the merge, identical behaviour) and `mayDelay:false` in `L.event` (the credit cap; live calls never set it).
 - `learning-ui.js`, `spark.html`: queue entries next to each live change, written in the same `spark_kids` save. A failed archive save rolls back its queue entries. Plus load-time validation of sync data and the settings section.
 - `sw.js`: caches the two new files, generation `spark-learning-20261104-sync1`. CI adds syntax checks, the `sync-lab` dry-run and the browser sync check.
@@ -184,16 +185,18 @@ Tombstones are bounded: one row per deleted child, and at most 100 child rows pe
 |---|---|
 | Endpoint unavailable / offline | Status line only. Changes stay queued. Background retry. Homework is unaffected. |
 | D1 unavailable | 503 `unavailable` with a content-free log. The phone is unchanged. |
-| Partial request failure / lost reply | The queue entry stays until acknowledged. The retry is acknowledged as `dup` (no duplicate). |
+| Partial request failure / lost reply | The queue entry stays until acknowledged. The retry is acknowledged as `dup` (no duplicate). An acknowledgement that does not match the request ids aborts the round. |
+| Family child quota reached | The new child stays shared with its records queued, and the status shows that the quota is full. It is never forked silently. |
+| A change that cannot be queued | The child (which already holds the change locally) leaves the family log and stays on the phone as a local copy. The change is never lost at the next fold. |
 | Interrupted download | The cursor advances only after the downloaded page has been applied and saved. The next download resumes from there. |
 | Local storage full | Nothing advances. The next round re-downloads and deduplicates. |
 | Malformed server reply | The round is aborted and nothing changes. An undecryptable or invalid record is skipped and counted in the status. |
-| Malformed stored sync data / migration problem | The child stays as an unshared local copy. Nothing is deleted. |
+| Malformed stored sync data / migration problem | The load-time shape check, or a fold that fails on deeper corruption, leaves that child as an unshared local copy. The round continues for the other children. Nothing is deleted. |
 | Not paired with the build's Worker | Sync is off and the status explains why. |
 
 ## 11. Tests and evidence
-- `tests/sync1.test.mjs` (26 tests): the real Worker code on a **real local D1** (workerd through `getPlatformProxy`, `sync-lab` environment, in memory), with real client engines as phones. It covers the 20 required cases, migration from old local-only state, checkpoint equivalence, reset and re-pair, removal from one phone, the feature gate, auth before database access, rate limits, the key codec and associated-data binding. A seeded randomized test (6 seeds × 70 operations on 3 phones, with offline toggles, clock skews and time jumps) checks that every phone's state equals a fresh replay of everything stored, before and after reload. **3 negative controls** each remove one defence (the seen-id check, the Worker clock flag, family scoping in pull) and show that the matching attack succeeds.
-- `tests/sync1-frontend.test.mjs` (6 tests, jsdom): default OFF for existing users (no UI, no request, no sync data); the build Worker is the only sync target; backups contain no sync data or key; malformed stored sync data keeps the child; index-safe removal; archive rollback; interaction timestamps stay local.
+- `tests/sync1.test.mjs` (33 tests, 7 of them review regressions): the real Worker code on a **real local D1** (workerd through `getPlatformProxy`, `sync-lab` environment, in memory), with real client engines as phones. It covers the 20 required cases, migration from old local-only state, checkpoint equivalence, reset and re-pair, removal from one phone, the feature gate, auth before database access, rate limits, the key codec and associated-data binding. A seeded randomized test (6 seeds × 70 operations on 3 phones, with offline toggles, clock skews and time jumps) checks that every phone's state equals a fresh replay of everything stored, before and after reload. **3 negative controls** each remove one defence (the seen-id check, the Worker clock flag, family scoping in pull) and show that the matching attack succeeds.
+- `tests/sync1-frontend.test.mjs` (8 tests, jsdom; includes the review regressions for the settings form and missing sync scripts): default OFF for existing users (no UI, no request, no sync data); the build Worker is the only sync target; backups contain no sync data or key; malformed stored sync data keeps the child; index-safe removal; archive rollback; interaction timestamps stay local.
 - `tests/browser-sync-check.mjs` (real Chromium, 5 independent browser profiles, the real Worker on real local D1):
   - A starts sync in the UI on a phone with an existing child. B joins with the typed key.
   - Both go offline, and both do real practice and word-list entry in the UI.
@@ -214,7 +217,7 @@ These estimates use measured record sizes: a skill op is about 470 B on the wire
 - **D1 storage:** about 3–4 MB per family per year, including session summaries and indexes.
 - **Requests:** about 10 rounds per phone on a day of use, at 1–3 requests each. That is roughly 20–60 requests per family per day, a few times what chat already uses. A new phone's first download after a year is about 20 pages.
 - **D1 rows:** a few rows read per idle pull, and about one row written per record. The free tier allows 5 M reads and 100 k writes per day and 5 GB of storage. A family uses well under 0.1 % of each.
-- **Phone storage:** per child, a checkpoint of about 30 KB, a 14-day log of about 30–60 KB, and seen ids of about 40 KB per year (capped at 30,000 ids).
+- **Phone storage:** per child, a checkpoint of about 30 KB, a 14-day log of about 30–60 KB, and seen ids of about 40 KB per year (capped at 30,000 ids). All of it lives inside `spark_kids` (one atomic write) and competes with homework saves for the browser's localStorage quota (about 5 MB).
 - **First relevant Cloudflare resource:** creating the **D1 database** itself (`wrangler d1 create`, plus migrations). Usage stays inside the free tier by orders of magnitude. If anything is ever metered first, it is D1 rows read, through frequent idle pulls from many phones.
 
 ## 14. Branch / status
@@ -224,7 +227,26 @@ Branch `sync1-privacy-first-multidevice-20261104`, from `f4f55af`. It is pushed 
 Run `node tests/browser-sync-check.mjs`, or start a dev server with `npx wrangler dev --env sync-lab` and `npx wrangler d1 migrations apply spark-sync-lab --local --env sync-lab`. In the app, set `localStorage.spark_sync_lab='1'` to show the section. Nothing has been created remotely.
 
 ## 16. Review history
-(Filled in after the fresh segregated review.)
+**Fresh segregated review of `d01ce0b`** (an independent agent; it reproduced its findings against the real Worker, local D1 and client engines). No finding in the following areas: auth before read, cross-family scoping, SQL sequencing and transactional re-checks, associated-data binding, the key codec, HKDF and IV use, the checkpoint horizon, TR1, default-off behaviour, logging. Findings and repairs:
+
+| # | Severity | Finding | Repair |
+|---|---|---|---|
+| 1 | Medium | A reset could bring back a child deleted earlier: the resetting phone was stale, or a re-joining phone forked and re-shared the child. | Reset first runs a sync round (`sync_first` if that fails). The Worker keeps tombstones of every generation. A re-joining phone verifies them with its previous key and removes those children. Tested both ways. |
+| 2 | Medium | One token could drain the family-wide/per-IP budget of parent operations and block a revocation. | Parent and enrol attempts are limited per device only. Guessing still needs many tokens, and every token needs pairing, which keeps its global limit. Tested: 20 spam calls from B, then A's revocation succeeds. |
+| 3 | Medium | Under an open settings form, a background round could be written back by «Lagre» as a stale profile, or onto another child. | No background round on the settings page; page buttons re-render the form. Tested. |
+| 4 | Medium | The same word added on two phones lost one phone's reviews and sentence. | Word-id aliases in the fold. Sentence matched by word + meaning. Tested. |
+| 5 | Low | A change whose queue entry was rejected (an empty meaning from a tutor marker) was wiped at the next fold. | Schema aligned with `L.addWord`. Any rejected queue entry now leaves the child as a local copy. Tested. |
+| 6 | Low | A late word review could move the last-review anchor back and gain delay credit. | `L.reviewWord` clamps the review time to the last review, as `L.event` does. Tested. |
+| 7 | Low | A compromised Worker can re-order and re-time records and so inflate derived mastery. | Documented as a residual in §3. It is not fixable without authenticated ordering. |
+| 8 | Low | Padding counted UTF-16 units, so the number of æ/ø/å leaked. | Padding is now in UTF-8 bytes. Tested. |
+| 9 | Low | A full child quota forked the new child silently. | It now waits with `quota` status. Tested. |
+| 10 | Low | Junk uploads from a token use quotas. | Documented in §3. |
+| 11 | Low | Push acknowledgements with wrong ids made the client loop. | The round is aborted. Tested (one push). |
+| 12 | Low | "Fjern fra denne telefonen" could hide a different child after the round; a running round can continue into homework. | The confirmed child is captured before the round. The residual is documented in §9. |
+| 13 | Low | Deep corruption of stored sync data made every round fail. | A throw-safe fold: only that child becomes a local copy. Tested. |
+| 14 | Info | Revocation was lost on reset. The app depended on the sync scripts loading. «Slett all historikk» could leave an extra empty profile. Sync data grows `spark_kids`. | Revocations survive a reset (tested). No-op fallbacks for the sync scripts (tested). The empty profile is replaced. The storage growth is documented in §13. |
+
+The review's doc corrections are applied: metadata list, padding, Worker re-ordering, the stolen-phone row, quota exhaustion, revocation permanence, and when background rounds run.
 
 ## 17. Exact blockers before production
 1. **Product decisions:**

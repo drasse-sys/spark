@@ -44,6 +44,11 @@ async function syncMember(db,fam,deviceId,gen){
   if(typeof gen!=='string'||!syncSame(gen,row.gen))return {status:409,code:'family_changed'};
   return {row};
 }
+// Tombstones of every generation, for a phone that proved the key or the family code (bounded by the child-row limit).
+async function syncTombstones(db,fam){
+  const rows=await db.prepare('SELECT child_id AS child, gen, record_id AS id, iv, ct FROM sync_tombstones WHERE family_id=?1 ORDER BY deleted_at LIMIT 100').bind(fam).all();
+  return rows.results.map(r=>({child:r.child,gen:r.gen,id:r.id,iv:r.iv,ct:r.ct}));
+}
 const SYNC_CODE_TEXT={not_enrolled:'enroll',revoked:'revoked',family_changed:'changed'};
 
 async function syncHandle(request,env,url,c,h){
@@ -57,12 +62,10 @@ async function syncHandle(request,env,url,c,h){
   if(!device||typeof device.deviceId!=='string'||!SYNC_DEVICE.test(device.deviceId))return error(401,'auth');
   const limiter=env.SYNC_LIMITER||env.CHAT_LIMITER;
   if(limiter){const {success}=await limiter.limit({key:'sync:'+device.deviceId});if(!success)return error(429,'rate');}
-  // Operations that need the family code, or that could be used to guess a membership proof, share pairing's budget.
-  const guarded=route==='admin'||route==='enroll';
-  if(guarded){
-    if(env.PAIR_GLOBAL_LIMITER){const {success}=await env.PAIR_GLOBAL_LIMITER.limit({key:'sync-admin'});if(!success)return error(429,'rate');}
-    if(env.PAIR_LIMITER){const {success}=await env.PAIR_LIMITER.limit({key:'sync-admin:'+(request.headers.get('cf-connecting-ip')||'unknown')});if(!success)return error(429,'rate');}
-  }
+  // Family-code and membership-proof attempts get pairing's strict rate, counted PER DEVICE: a stolen or hostile token
+  // can only use up its own budget, never the parent's (a shared family-wide or per-IP budget could be drained to block a
+  // revocation). Guessing therefore needs many tokens, and every token needs pairing, which keeps its global limit.
+  if((route==='admin'||route==='enroll')&&env.PAIR_LIMITER){const {success}=await env.PAIR_LIMITER.limit({key:'sync-admin:'+device.deviceId});if(!success)return error(429,'rate');}
   const parsed=await h.readBody(request,route==='push'?SYNC_LIMITS.pushBody:route==='admin'?4096:1024);
   if(parsed.error)return reply({error:parsed.error,code:parsed.status===413?'too_large':'bad_request'},parsed.status);
   const b=parsed.body;
@@ -88,7 +91,7 @@ async function syncHandle(request,env,url,c,h){
         ]);
         const row=await db.prepare('SELECT gen FROM sync_families WHERE family_id=?1').bind(fam).first();
         if(row?.gen!==gen)return error(409,'family_exists','exists');
-        return reply({v:1,gen,serverNow:now});
+        return reply({v:1,gen,serverNow:now,tombstones:await syncTombstones(db,fam)});
       }
       const row=await db.prepare('SELECT f.gen AS gen, f.verifier AS verifier, d.status AS status FROM sync_families f LEFT JOIN sync_devices d ON d.family_id=f.family_id AND d.device_id=?2 WHERE f.family_id=?1').bind(fam,device.deviceId).first();
       if(!row)return error(404,'no_family','none');
@@ -96,7 +99,7 @@ async function syncHandle(request,env,url,c,h){
       // Revocation is permanent for this device id: a lost phone that still holds the key cannot re-enrol itself.
       if(row.status==='revoked')return error(403,'revoked');
       await db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day) VALUES (?1, ?2, 'active', ?3, ?4) ON CONFLICT(family_id, device_id) DO UPDATE SET seen_day=excluded.seen_day WHERE sync_devices.status='active'").bind(fam,device.deviceId,now,syncDay(now)).run();
-      return reply({v:1,gen:row.gen,serverNow:now});
+      return reply({v:1,gen:row.gen,serverNow:now,tombstones:await syncTombstones(db,fam)});
     }
     if(route==='push'){
       if(!syncKeys(b,['v','gen','clientNow','records'])||typeof b.gen!=='string'||!Number.isSafeInteger(b.clientNow)||!Array.isArray(b.records)||b.records.length<1||b.records.length>SYNC_LIMITS.pushRecords||
@@ -182,17 +185,19 @@ async function syncHandle(request,env,url,c,h){
     if(!env.FAMILY_CODE)return error(503,'setup');
     if(!h.sameCode(b.code,env.FAMILY_CODE))return error(401,'family_code','code');
     if(op==='reset'){
-      // Lost key or key rotation: everything this family stored is deleted and a new generation starts with the caller.
-      // Phones keep their local data; previously shared children become local copies until shared again.
+      // Lost key or key rotation: the family's records and active children and enrolments are deleted and a new generation
+      // starts with the caller. Kept: revocations (a revoked id stays revoked), deleted child ids (never accepted again)
+      // and tombstones (handed to re-joining phones). Phones keep their local data.
       const gen=syncId(),verifier=await syncDigest(b.proof);
       await db.batch([
         db.prepare('DELETE FROM sync_records WHERE family_id=?1').bind(fam),
-        db.prepare('DELETE FROM sync_children WHERE family_id=?1').bind(fam),
-        db.prepare('DELETE FROM sync_devices WHERE family_id=?1').bind(fam),
+        db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='active'").bind(fam),
+        db.prepare("DELETE FROM sync_devices WHERE family_id=?1 AND status='active'").bind(fam),
         db.prepare('INSERT INTO sync_families (family_id, gen, verifier, head, record_count, byte_count, created_at) VALUES (?1, ?2, ?3, 0, 0, 0, ?4) ON CONFLICT(family_id) DO UPDATE SET gen=excluded.gen, verifier=excluded.verifier, record_count=0, byte_count=0').bind(fam,gen,verifier,now),
-        db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day) VALUES (?1, ?2, 'active', ?3, ?4)").bind(fam,device.deviceId,now,syncDay(now))
+        // The caller proved the family code (the parent), so its own device is (re)activated.
+        db.prepare("INSERT INTO sync_devices (family_id, device_id, status, enrolled_at, seen_day) VALUES (?1, ?2, 'active', ?3, ?4) ON CONFLICT(family_id, device_id) DO UPDATE SET status='active', enrolled_at=excluded.enrolled_at, seen_day=excluded.seen_day").bind(fam,device.deviceId,now,syncDay(now))
       ]);
-      return reply({v:1,gen,serverNow:now});
+      return reply({v:1,gen,serverNow:now,tombstones:await syncTombstones(db,fam)});
     }
     const m=await syncMember(db,fam,device.deviceId,b.gen);if(!m.row)return error(m.status,m.code,SYNC_CODE_TEXT[m.code]);
     if(op==='revoke'){
@@ -206,6 +211,7 @@ async function syncHandle(request,env,url,c,h){
     if(child?.status!=='active')return error(404,'child_unknown','child');
     await db.batch([
       db.prepare('DELETE FROM sync_records WHERE family_id=?1 AND child_id=?2').bind(fam,b.child),
+      db.prepare('INSERT OR REPLACE INTO sync_tombstones (family_id, child_id, gen, record_id, iv, ct, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)').bind(fam,b.child,m.row.gen,b.record.id,b.record.iv,b.record.ct,now),
       db.prepare("UPDATE sync_children SET status='deleted', deleted_at=?3 WHERE family_id=?1 AND child_id=?2").bind(fam,b.child,now),
       db.prepare("INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, head+1, ?2, ?3, 'tombstone', ?4, 1, ?5, ?6 FROM sync_families WHERE family_id=?1 AND NOT EXISTS (SELECT 1 FROM sync_records WHERE family_id=?1 AND record_id=?2)").bind(fam,b.record.id,b.child,now,b.record.iv,b.record.ct),
       db.prepare(`UPDATE sync_families SET head=MAX(head,COALESCE((SELECT MAX(seq) FROM sync_records WHERE family_id=?1),0)),

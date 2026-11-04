@@ -497,8 +497,9 @@ test('rate limits: sync uses its own per-device budget; enrolment and parent ope
   const f2=family(db,clock,'rl'+(n++));const t2=await f2.b.api.makeToken(f2.env,webcrypto.randomUUID());
   await call(f2,'/sync/status',{v:1},t2);await call(f2,'/sync/enroll',{v:1,mode:'join',proof:'A'.repeat(43)},t2);
   assert.ok(f2.calls.some(c=>c.name==='CHAT_LIMITER'&&c.key.startsWith('sync:')));
-  assert.ok(f2.calls.some(c=>c.name==='PAIR_LIMITER'&&c.key.startsWith('sync-admin:')));
-  assert.ok(f2.calls.some(c=>c.name==='PAIR_GLOBAL_LIMITER'&&c.key==='sync-admin'));
+  const device=JSON.parse(Buffer.from(t2.split('.')[0],'base64url')).deviceId;
+  assert.ok(f2.calls.some(c=>c.name==='PAIR_LIMITER'&&c.key==='sync-admin:'+device),'per device, not per IP');
+  assert.ok(!f2.calls.some(c=>c.name==='PAIR_GLOBAL_LIMITER'),'no family-wide budget a token holder could drain');
   const f3=family(db,clock,'rl'+(n++),{PAIR_LIMITER:{limit:async()=>({success:false})}});const t3=await f3.b.api.makeToken(f3.env,webcrypto.randomUUID());
   assert.equal((await call(f3,'/sync/admin',{v:1,op:'reset',code:f3.code,proof:'A'.repeat(43)},t3)).status,429);
   assert.equal((await call(f3,'/sync/pull',{v:1,gen:'x',cursor:0},t3)).status,403,'ordinary sync is not on the pairing budget');
@@ -560,4 +561,74 @@ test('negative control: without family scoping in pull another family\'s records
   const scoped=await call(one.fam,'/sync/pull',{v:1,gen:one.A.engine.state().gen,cursor:0},one.A.token());assert.ok(scoped.data.records.every(r=>r.child===oneChild));
   const leaked=await call(two.fam,'/sync/pull',{v:1,gen,cursor:0},two.A.token());
   assert.ok(leaked.data.records.some(r=>r.child===oneChild),'the patched Worker leaks family one');
+});
+
+/* Repairs after the fresh review (each test reproduces the reviewer's scenario). */
+test('review #1: a reset never brings back a child deleted earlier (resetting phone was stale, or another phone resets)',async()=>{
+  {// The stale phone resets: it applies the deletion first.
+    const {fam,A,B}=await pair('r1a');B.online=false;
+    assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:A.kid('Ada')}),{ok:true});
+    B.online=true;const r=await B.engine.reset({code:fam.code});assert.ok(r.ok);
+    assert.equal(B.kid('Ada'),undefined);await B.sync();
+    assert.ok((await A.engine.join({key:r.key})).ok);await A.sync();assert.equal(A.kid('Ada'),undefined);
+    B.online=false;assert.equal((await B.engine.reset({code:fam.code})).code,'sync_first','no reset while the deletions cannot be fetched');
+  }
+  {// Another phone resets; the stale phone re-joins and verifies the old tombstone with its previous key.
+    const {fam,A,B}=await pair('r1b');B.online=false;
+    assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:A.kid('Ada')}),{ok:true});
+    const r=await A.engine.reset({code:fam.code});assert.ok(r.ok);
+    B.online=true;assert.equal((await B.sync()).code,'rejoin');
+    assert.ok((await B.engine.join({key:r.key})).ok);assert.equal(B.kids.some(k=>k.name==='Ada'),false,'removed, not kept as a copy');
+  }
+});
+test('review #2: a token holder spamming parent operations cannot use up the parent\'s budget',async()=>{
+  const counts=new Map();const limiter={limit:async({key})=>{const n=(counts.get(key)||0)+1;counts.set(key,n);return {success:n<=6};}};
+  const clock=world(),fam=family(db,clock,'r2'+(n++),{PAIR_LIMITER:limiter,PAIR_GLOBAL_LIMITER:limiter});
+  const A=await device(fam,clock),B=await device(fam,clock);A.kids[0].name='Ada';const c=await A.engine.create({code:fam.code});
+  await B.engine.join({key:c.key});await A.sync();await B.sync();
+  for(let i=0;i<20;i++)await call(fam,'/sync/admin',{junk:1},B.token());
+  const victim=(await A.engine.devices()).devices.find(d=>!d.self).device;
+  assert.deepEqual(await A.engine.revoke({code:fam.code,device:victim}),{ok:true});
+});
+test('review #4/#5: the same word added on two phones keeps both phones\' reviews; an empty meaning still syncs',async()=>{
+  const {clock,A,B}=await pair('r4');A.online=B.online=false;
+  A.addWord(A.kid('Ada'),'hus','et sted å bo');B.addWord(B.kid('Ada'),'hus','et sted å bo','Ola så et hus.');
+  const bid=B.kid('Ada').learning.items[0].id;clock.advance(2*DAY);B.reviewWord(B.kid('Ada'),bid);clock.advance(2*DAY);B.reviewWord(B.kid('Ada'),bid);
+  A.addWord(A.kid('Ada'),'katt','');
+  A.online=B.online=true;await A.sync();await B.sync();await A.sync();
+  assert.equal(snapshot(A),snapshot(B));
+  const hus=A.kid('Ada').learning.items.filter(w=>w.word==='hus');assert.equal(hus.length,1);assert.equal(hus[0].ev.length,2,'B\'s reviews count');
+  assert.equal(B.kid('Ada').learning.items.find(w=>w.word==='hus').sentence,'Ola så et hus.','B keeps its sentence');
+  assert.ok(B.kid('Ada').learning.items.some(w=>w.word==='katt'),'empty-meaning word reached B');assert.ok(A.kid('Ada').sync,'still shared');
+});
+test('review #6: a late review never moves the last-review anchor back (no delay credit gained)',()=>{
+  const m=L.empty();L.addWord(m,{id:'w',word:'hus',meaning:'x',t:0});
+  L.reviewWord(m,{wordId:'w',t:DAY,s:0,ok:true,c:''});L.reviewWord(m,{wordId:'w',t:5*DAY,s:0,ok:true,c:''});
+  L.reviewWord(m,{wordId:'w',t:2*DAY,s:2,ok:true,c:''});assert.equal(m.items[0].lastAt,5*DAY);
+  assert.equal(L.reviewWord(m,{wordId:'w',t:5*DAY+12*3600000,s:0,ok:true,c:''}).delayed,false);
+});
+test('review #8: padding buckets count encrypted UTF-8 bytes, so non-ASCII letters do not change the length',async()=>{
+  const k=await S.deriveKeys(webcrypto.subtle,webcrypto.getRandomValues(new Uint8Array(16))),r=x=>webcrypto.getRandomValues(new Uint8Array(x));
+  const len=async name=>(await S.seal(webcrypto.subtle,r,k.encKey,'G'.repeat(21)+'A',{id:'I'.repeat(21)+'A',child:'C'.repeat(21)+'A',kind:'op'},{type:'profile',v:1,t:1,after:0,profile:{name,age:9,interests:'',readAloud:false}})).ct.length;
+  assert.equal(await len('Bjorn Aagard'),await len('Bjørn Ågård'));assert.equal(await len('Bjorn Aagard'),await len('Æøå æøå æøå'));
+});
+test('review #9/#11/#13: full child quota waits instead of forking; malformed acknowledgements stop the round; corrupt stored data costs one child only',async()=>{
+  const {fam,A,B}=await pair('r9');
+  for(let i=0;i<20;i++){const k=blankKid('Barn'+i);A.kids.push(k);A.practice(k,'add1');A.engine.share(k);}A.saveKids();
+  assert.equal((await A.sync()).code,'quota');
+  const waiting=A.kids.filter(k=>k.sync&&k.sync.pending.length);assert.equal(waiting.length,1);assert.equal(waiting[0].fork,undefined,'still shared, waiting');
+  let pushes=0;B.practice(B.kid('Ada'),'sub1');
+  B.intercept=async(path,body,call)=>{const r=await call();if(path==='/sync/push'){pushes++;r.data.results=r.data.results.map(x=>({...x,id:'X'.repeat(21)+'A'}));}return r;};
+  assert.equal((await B.sync()).code,'unavailable');assert.equal(pushes,1);B.intercept=null;
+  assert.ok(fam);
+  const other=await pair('r13');const D=other.B;
+  D.kid('Ada').sync.cp.st.learning.skills.add1.ev='corrupt';
+  const C=blankKid('Cia');D.kids.push(C);D.practice(C,'add1');D.engine.share(C);D.saveKids();other.A.practice(other.A.kid('Ada'),'add1');await other.A.sync();
+  assert.deepEqual(await D.sync(),{ok:true});assert.equal(D.kid('Ada').fork,true);assert.ok(D.kid('Cia').sync&&D.kid('Cia').sync.pending.length===0);
+});
+test('review #14: a revoked device stays revoked after a reset',async()=>{
+  const {fam,A,B}=await pair('r14');
+  const victim=(await A.engine.devices()).devices.find(d=>!d.self).device;await A.engine.revoke({code:fam.code,device:victim});
+  const r=await A.engine.reset({code:fam.code});assert.ok(r.ok);
+  assert.equal((await B.engine.join({key:r.key})).code,'revoked');
 });

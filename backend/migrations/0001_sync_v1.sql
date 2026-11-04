@@ -45,3 +45,16 @@ CREATE TABLE IF NOT EXISTS sync_records (
 );
 
 CREATE INDEX IF NOT EXISTS sync_records_child ON sync_records (family_id, child_id);
+
+-- Tombstones outlive a reset: a phone that re-joins after a reset verifies them with its previous key and generation,
+-- so a child deleted before the reset cannot come back from that phone. One row per deleted child.
+CREATE TABLE IF NOT EXISTS sync_tombstones (
+  family_id  TEXT NOT NULL,
+  child_id   TEXT NOT NULL,
+  gen        TEXT NOT NULL,                -- generation the tombstone was encrypted for
+  record_id  TEXT NOT NULL,
+  iv         TEXT NOT NULL,
+  ct         TEXT NOT NULL,
+  deleted_at INTEGER NOT NULL,
+  PRIMARY KEY (family_id, child_id)
+);

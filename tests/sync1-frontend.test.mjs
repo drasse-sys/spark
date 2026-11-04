@@ -79,3 +79,20 @@ test('archiving a shared child queues reflection and summary; a failed save roll
     assert.equal(queue[2].p.session.interactions.length,0,'interaction timestamps stay on the phone');
   });
 });
+
+test('review #3: background rounds never run under the open settings form',async()=>{
+  const net=spy();
+  await page({storage:{...pairedStorage,spark_sync:JSON.stringify({v:1,key:'0000-0000-0000-0000-0000-0000-0000',gen:'G'.repeat(21)+'A',cursor:0})},fetch:net.fetch},async f=>{
+    f.app.set("view='setup';render();");await f.app.set('syncRun()');
+    assert.ok(net.calls.every(c=>!c.url.includes('/sync/')),'no background round on the settings page');
+  });
+});
+test('review #14: if sync.js fails to load the app works exactly as before',async()=>{
+  const net=spy();
+  await page({storage:pairedStorage,fetch:net.fetch,patch:s=>{assert.ok(s.includes('root.SparkSync={'));return s.replace('root.SparkSync={','root.__notLoaded={');}},async f=>{
+    f.app.set("kid().name='Ada';view='chat';chatMsgs=[{role:'user',text:'7+5'},{role:'assistant',text:'Hva tror du?'}];initHomeworkLearning('7+5');learningSession.task.attempts=1;recordLearning(true,true);");
+    assert.equal(f.app.archiveSession(''),true);f.app.set("view='setup';render();");
+    assert.match(f.w.document.getElementById('main').textContent,/synkroniseres ikke mellom enheter/);
+    assert.equal(JSON.parse(f.w.localStorage.getItem('spark_kids'))[0].learning.sessions.length,1);
+  });
+});

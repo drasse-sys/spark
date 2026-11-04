@@ -156,6 +156,10 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
    Profiler, økter og enhetstoken lagres lokalt på denne telefonen.
 ============================================== */
 
+// SYNC1: if sync.js or sync-ui.js did not load, these no-op fallbacks keep the app working exactly as before.
+for(const [name,fn] of Object.entries({syncInitKids:()=>{},syncRecord:()=>{},syncProfile:()=>{},syncSoon:()=>{},syncHTML:()=>'',bindSync:()=>{},syncResetChildLearning:()=>{},
+  syncNoteHTML:()=>'<div class="note info"><strong>📱 Flere telefoner:</strong> den samme Spark-serveren kan brukes av Olav, lillebror og en tredje telefon. Hver telefon pares én gang. Profiler og økthistorikk er foreløpig lokale på hver telefon og synkroniseres ikke mellom enheter.</div>'}))
+  if(typeof window[name]!=='function')window[name]=fn;
 const LS = { kids:'spark_kids', active:'spark_active', voice:'spark_voice',
              voiceName:'spark_voice_name', sess:'spark_session',
              server:'spark_server_url', device:'spark_device_token', tokenServer:'spark_device_server' };
