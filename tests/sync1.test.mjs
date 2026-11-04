@@ -571,7 +571,7 @@ test('review #1: a reset never brings back a child deleted earlier (resetting ph
     B.online=true;const r=await B.engine.reset({code:fam.code});assert.ok(r.ok);
     assert.equal(B.kid('Ada'),undefined);await B.sync();
     assert.ok((await A.engine.join({key:r.key})).ok);await A.sync();assert.equal(A.kid('Ada'),undefined);
-    B.online=false;assert.equal((await B.engine.reset({code:fam.code})).code,'sync_first','no reset while the deletions cannot be fetched');
+    B.online=false;assert.equal((await B.engine.reset({code:fam.code})).code,'offline');
   }
   {// Another phone resets; the stale phone re-joins and verifies the old tombstone with its previous key.
     const {fam,A,B}=await pair('r1b');B.online=false;
@@ -604,8 +604,11 @@ test('review #4/#5: the same word added on two phones keeps both phones\' review
 test('review #6: a late review never moves the last-review anchor back (no delay credit gained)',()=>{
   const m=L.empty();L.addWord(m,{id:'w',word:'hus',meaning:'x',t:0});
   L.reviewWord(m,{wordId:'w',t:DAY,s:0,ok:true,c:''});L.reviewWord(m,{wordId:'w',t:5*DAY,s:0,ok:true,c:''});
-  L.reviewWord(m,{wordId:'w',t:2*DAY,s:2,ok:true,c:''});assert.equal(m.items[0].lastAt,5*DAY);
+  // A review from day 2 merged after day 5 (stale upload): no credit for it, and none for the next review either.
+  assert.equal(L.reviewWord(m,{wordId:'w',t:2*DAY,s:2,ok:true,c:''}).delayed,false);
   assert.equal(L.reviewWord(m,{wordId:'w',t:5*DAY+12*3600000,s:0,ok:true,c:''}).delayed,false);
+  // Within a day the review is clamped to the last one, so the anchor does not move back at all.
+  L.reviewWord(m,{wordId:'w',t:9*DAY,s:0,ok:true,c:''});L.reviewWord(m,{wordId:'w',t:8.5*DAY,s:0,ok:true,c:''});assert.equal(m.items[0].lastAt,9*DAY);
 });
 test('review #8: padding buckets count encrypted UTF-8 bytes, so non-ASCII letters do not change the length',async()=>{
   const k=await S.deriveKeys(webcrypto.subtle,webcrypto.getRandomValues(new Uint8Array(16))),r=x=>webcrypto.getRandomValues(new Uint8Array(x));
@@ -631,4 +634,40 @@ test('review #14: a revoked device stays revoked after a reset',async()=>{
   const victim=(await A.engine.devices()).devices.find(d=>!d.self).device;await A.engine.revoke({code:fam.code,device:victim});
   const r=await A.engine.reset({code:fam.code});assert.ok(r.ok);
   assert.equal((await B.engine.join({key:r.key})).code,'revoked');
+});
+
+/* Repairs after the narrow re-review. */
+test('re-review HIGH-1: a stale phone from an older generation never re-shares a child deleted in a later one',async()=>{
+  const {fam,A,B}=await pair('rr1');B.online=false;
+  const r1=await A.engine.reset({code:fam.code});assert.ok(r1.ok);await A.sync();
+  const ada2=A.kid('Ada');assert.ok(ada2.sync);assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:ada2}),{ok:true});
+  B.online=true;const r2=await B.engine.reset({code:fam.code});assert.ok(r2.ok);
+  const local=B.kid('Ada');assert.ok(local&&!local.sync&&local.fork,'kept on B as a local copy only');
+  assert.equal(B.engine.shareAll(),0,'local copies are never shared in bulk');
+  assert.ok((await A.engine.join({key:r2.key})).ok);await A.sync();assert.equal(A.kid('Ada'),undefined);
+  // Join variant.
+  const {fam:f2,A:A2,B:B2}=await pair('rr1b');B2.online=false;
+  const k1=await A2.engine.reset({code:f2.code});await A2.sync();await A2.engine.deleteChild({code:f2.code,kid:A2.kid('Ada')});
+  B2.online=true;assert.ok((await B2.engine.join({key:k1.key})).ok);await B2.sync();
+  assert.ok(B2.kid('Ada').fork);assert.equal(B2.engine.shareAll(),0);await A2.sync();assert.equal(A2.kid('Ada'),undefined);
+});
+test('re-review HIGH-2: a full family can still reset; deleted ids are bounded and never fill the child quota',async()=>{
+  const {fam,A}=await pair('rr2');
+  for(let i=0;i<20;i++){const k=blankKid('Barn'+i);A.kids.push(k);A.practice(k,'add1');A.engine.share(k);}A.saveKids();
+  assert.equal((await A.sync()).code,'quota');
+  const r=await A.engine.reset({code:fam.code});assert.ok(r.ok,'reset is the way out');
+  // 150 deletions over time: ids and tombstones stay bounded at 100, and sharing still works.
+  const famId=(await db.prepare('SELECT family_id AS f FROM sync_families WHERE gen=?1').bind(A.engine.state().gen).first()).f;
+  for(let i=0;i<150;i++)await db.prepare("INSERT INTO sync_children (family_id, child_id, status, created_at, deleted_at) VALUES (?1, ?2, 'deleted', 1, ?3)").bind(famId,'Z'+String(i).padStart(20,'0')+'A',i).run();
+  await A.sync();
+  for(const k of A.kids.filter(x=>x.sync&&!x.sync.pending.length).slice(0,2))assert.deepEqual(await A.engine.deleteChild({code:fam.code,kid:k}),{ok:true});
+  const n=(await db.prepare("SELECT COUNT(*) AS n FROM sync_children WHERE family_id=?1 AND status='deleted'").bind(famId).first()).n;assert.equal(n,100);
+  const fresh=blankKid('Ny');A.kids.push(fresh);A.practice(fresh,'add1');A.engine.share(fresh);A.saveKids();await A.sync();
+  assert.equal(fresh.sync.pending.length,0,'shared despite 100 deleted ids');
+});
+test('re-review MEDIUM: one far-future review does not pin a word in the future',()=>{
+  const m=L.empty();L.addWord(m,{id:'w',word:'hus',meaning:'x',t:0});
+  L.reviewWord(m,{wordId:'w',t:DAY,s:0,ok:true,c:''});L.reviewWord(m,{wordId:'w',t:400*DAY,s:0,ok:true,c:''});
+  const r=L.reviewWord(m,{wordId:'w',t:3*DAY,s:0,ok:true,c:''});assert.equal(r.delayed,false);assert.equal(m.items[0].lastAt,3*DAY,'re-anchored');
+  assert.equal(L.reviewWord(m,{wordId:'w',t:5*DAY,s:0,ok:true,c:''}).delayed,true,'normal credit resumes');
 });

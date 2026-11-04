@@ -96,3 +96,15 @@ test('review #14: if sync.js fails to load the app works exactly as before',asyn
     assert.equal(JSON.parse(f.w.localStorage.getItem('spark_kids'))[0].learning.sessions.length,1);
   });
 });
+test('re-review LOW: a missing sync script keeps shared children as local copies and restarts the download',async()=>{
+  for(const missing of ['sync.js','sync-ui.js']){
+    const kid={name:'Ada',age:9,interests:'',notes:[],log:[],sessions:[],learning:{version:3,skills:{},items:[],sessions:[],totals:{cold:0,independentCold:0}},id:'C'.repeat(21)+'A',sync:{v:1,cp:{st:null},log:[],pending:[],seen:[]}};
+    const patch=s=>missing==='sync.js'?s.replace('root.SparkSync={','root.__notLoaded={'):s.replace('function syncInitKids(){','function __gone(){').replace(/^function (sync[A-Za-z]+|bindSync)\(/gm,'function __$1(');
+    await page({storage:{...pairedStorage,...MIGRATED,spark_sync:STATE,spark_kids:JSON.stringify([kid])},patch},async f=>{
+      const k=f.app.state().kids[0];assert.equal(k.sync,undefined,missing);assert.equal(k.fork,true);
+      assert.equal(JSON.parse(f.w.localStorage.getItem('spark_sync')).cursor,0);
+      f.app.set("view='chat';chatMsgs=[{role:'user',text:'7+5'},{role:'assistant',text:'?'}];initHomeworkLearning('7+5');learningSession.task.attempts=1;recordLearning(true,true);");
+      assert.equal(f.app.archiveSession(''),true);
+    });
+  }
+});

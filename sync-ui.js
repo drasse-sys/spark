@@ -23,8 +23,10 @@ function syncEngineGet(){
 const syncOn=()=>!!SY&&!!store.getItem(SYNC_STATE)&&syncEngineGet().state().enabled;
 // Load-time check of every child's sync data. Malformed data never deletes anything: the child stays as a local copy.
 function syncInitKids(){
+  // sync.js missing: same as the fallback in spark.html (local copies, download restarts later).
+  if(!SY){let n=0;for(const k of kids)if(k.sync){delete k.sync;delete k.id;k.fork=true;n++;}if(n){try{const s=JSON.parse(localStorage.getItem('spark_sync')||'null');if(s){s.cursor=0;localStorage.setItem('spark_sync',JSON.stringify(s));}}catch{}}return;}
   for(const k of kids){
-    if(!SY){if(k.sync){delete k.sync;delete k.id;k.fork=true;}continue;}
+    if(!SY)break;
     if(!k.sync)continue;
     const s=SY.ID.test(k.id||'')?SY.normalizeSync(k.sync):null;
     if(s)k.sync=s;else{delete k.sync;delete k.id;k.fork=true;}
@@ -65,7 +67,9 @@ async function syncRun(){
   if(busy||view==='chat'||view==='setup'){syncSoon(30000);return;}
   const before=JSON.stringify(kids.map(k=>[k.id,k.name]));
   await syncEngineGet().sync().catch(()=>null);
-  if(view==='start'&&!busy&&JSON.stringify(kids.map(k=>[k.id,k.name]))!==before)render();
+  const changed=JSON.stringify(kids.map(k=>[k.id,k.name]))!==before;
+  // A round can finish after the parent opened settings: a form showing old values is re-drawn, never saved stale.
+  if((view==='start'||view==='setup')&&!busy&&changed)render();
   else if(view==='setup')syncShowStatus();
 }
 const SYNC_STATUS={
@@ -125,11 +129,13 @@ function bindSync(){
     const r=await e.join({key:$('syncKeyIn').value});if(!r.ok){alert(syncError(r));return;}
     store.setItem('spark_sync_lab','1');
     await e.sync();
-    const local=kids.filter(k=>!k.sync&&!SY.blank(k));
+    const local=kids.filter(k=>!k.sync&&!k.fork&&!SY.blank(k));
     if(local.length&&confirm('Denne telefonen har '+local.length+' barn som ikke er delt. Dele dem med familien som egne barn? (Avbryt: de blir bare her.)')){e.shareAll();saveKids();await e.sync();}
   });
   if($('syncNow'))$('syncNow').onclick=ev=>syncGuard(ev.currentTarget,()=>e.sync());
-  if($('syncShare'))$('syncShare').onclick=ev=>syncGuard(ev.currentTarget,async()=>{if(!e.share(kid())){alert('Et tomt barn uten navn deles ikke.');return;}if(!saveKids()){alert(SYNC_ERRORS.storage);return;}await e.sync();});
+  if($('syncShare'))$('syncShare').onclick=ev=>syncGuard(ev.currentTarget,async()=>{
+    if(kid().fork&&!confirm('Dette er en lokal kopi fra før synkroniseringen ble endret. Hvis barnet er slettet fra familien, deles det nå på nytt. Dele likevel?'))return;
+    if(!e.share(kid())){alert('Et tomt barn uten navn deles ikke.');return;}if(!saveKids()){alert(SYNC_ERRORS.storage);return;}await e.sync();});
   if($('syncHide'))$('syncHide').onclick=ev=>syncGuard(ev.currentTarget,async()=>{
     const k=kid();if(!confirm('Fjerne '+(k.name||'barnet')+' fra denne telefonen? Barnet beholdes på de andre telefonene. Samtaler som bare finnes her, slettes.'))return;
     // The confirmed child, not whatever is active after the round (a round can add or remove children).

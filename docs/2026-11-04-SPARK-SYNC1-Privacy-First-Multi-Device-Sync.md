@@ -156,9 +156,9 @@ Every property below is covered by tests. Idempotent: replay is ignored and a re
 | Clear transcript / history locally | local | Unchanged. Transcripts are never synced. | n/a |
 | Delete synced learning data (keep child) | family code | "Slett all historikk" on a shared child: delete from family, then share a fresh, empty child with the same profile under a new id. | As above: the old id is a tombstone. |
 | Revoke a device | family code | Registry row → `revoked` (permanent for that id). | It gets 403 and keeps local data. Re-enrolling the same id is refused. |
-| Reset family / rotate key | family code | The resetting phone first completes a sync round, so every deletion it can receive is applied before it re-shares its children. If it cannot sync, it refuses (`sync_first`). The Worker then deletes the family's records, active children and active enrolments, and starts a new generation. Kept: revocations, deleted child ids, and tombstones of every generation. | It gets 409 and must enter the new key. On re-joining it receives the old tombstones and verifies them with its previous key: children deleted before the reset are removed. Other shared children become local copies, so nothing is lost. |
+| Reset family / rotate key | family code | Always possible: it is the way out of a lost key, a full family or a corrupt stored key. The resetting phone first runs a sync round. Only if that round downloaded completely in the current generation (so every deletion it can receive is applied) does it share its children again automatically. Otherwise they stay as local copies. The Worker then deletes the family's records, active children and active enrolments, and starts a new generation. Kept: revocations, deleted child ids, and tombstones of every generation. | It gets 409 and must enter the new key. On re-joining it receives the old tombstones and verifies them with its previous key: children deleted before the reset are removed. Other shared children become local copies, so nothing is lost. **Local copies are never shared in bulk.** They are shared only one at a time, after a warning that the child may have been deleted from the family. A child deleted in a *later* generation than the phone knew cannot be verified by that phone. The rule above is what keeps it from coming back silently. |
 
-Tombstones are bounded: one row per deleted child, and at most 100 child rows per family.
+Tombstones are bounded: the newest 100 deleted ids and tombstones are kept, and they do not count toward the 20-child quota. A phone that missed more than 100 deletions and still holds an older one gets `child_unknown` for it, and keeps it as a local copy that is never shared automatically.
 
 ## 9. Implementation (this branch)
 - `backend/migrations/0001_sync_v1.sql`: four tables (`sync_families`, `sync_devices`, `sync_children`, `sync_records`), with `CHECK` constraints and `UNIQUE(family_id, record_id)`.
@@ -195,8 +195,8 @@ Tombstones are bounded: one row per deleted child, and at most 100 child rows pe
 | Not paired with the build's Worker | Sync is off and the status explains why. |
 
 ## 11. Tests and evidence
-- `tests/sync1.test.mjs` (33 tests, 7 of them review regressions): the real Worker code on a **real local D1** (workerd through `getPlatformProxy`, `sync-lab` environment, in memory), with real client engines as phones. It covers the 20 required cases, migration from old local-only state, checkpoint equivalence, reset and re-pair, removal from one phone, the feature gate, auth before database access, rate limits, the key codec and associated-data binding. A seeded randomized test (6 seeds × 70 operations on 3 phones, with offline toggles, clock skews and time jumps) checks that every phone's state equals a fresh replay of everything stored, before and after reload. **3 negative controls** each remove one defence (the seen-id check, the Worker clock flag, family scoping in pull) and show that the matching attack succeeds.
-- `tests/sync1-frontend.test.mjs` (8 tests, jsdom; includes the review regressions for the settings form and missing sync scripts): default OFF for existing users (no UI, no request, no sync data); the build Worker is the only sync target; backups contain no sync data or key; malformed stored sync data keeps the child; index-safe removal; archive rollback; interaction timestamps stay local.
+- `tests/sync1.test.mjs` (36 tests, 10 of them review regressions): the real Worker code on a **real local D1** (workerd through `getPlatformProxy`, `sync-lab` environment, in memory), with real client engines as phones. It covers the 20 required cases, migration from old local-only state, checkpoint equivalence, reset and re-pair, removal from one phone, the feature gate, auth before database access, rate limits, the key codec and associated-data binding. A seeded randomized test (6 seeds × 70 operations on 3 phones, with offline toggles, clock skews and time jumps) checks that every phone's state equals a fresh replay of everything stored, before and after reload. **3 negative controls** each remove one defence (the seen-id check, the Worker clock flag, family scoping in pull) and show that the matching attack succeeds.
+- `tests/sync1-frontend.test.mjs` (9 tests, jsdom; includes the review regressions for the settings form and missing sync scripts): default OFF for existing users (no UI, no request, no sync data); the build Worker is the only sync target; backups contain no sync data or key; malformed stored sync data keeps the child; index-safe removal; archive rollback; interaction timestamps stay local.
 - `tests/browser-sync-check.mjs` (real Chromium, 5 independent browser profiles, the real Worker on real local D1):
   - A starts sync in the UI on a phone with an existing child. B joins with the typed key.
   - Both go offline, and both do real practice and word-list entry in the UI.
@@ -248,6 +248,17 @@ Run `node tests/browser-sync-check.mjs`, or start a dev server with `npx wrangle
 
 The review's doc corrections are applied: metadata list, padding, Worker re-ordering, the stolen-phone row, quota exhaustion, revocation permanence, and when background rounds run.
 
+**Narrow re-review of `2ca09d9`** (a second independent agent; it reproduced its findings on real local D1). Repairs #2, #4, #5, #8, #9, #11 and #13 hold. No recursion between reset and the sync lock. Aliases are deterministic. Tombstones in enrol and reset responses cannot be abused or leak anything.
+
+| Finding | Severity | Repair (self-verified; no further independent review) |
+|---|---|---|
+| Repair #1 incomplete: a phone stale by more than one generation reset (or joined) and re-shared a child that was deleted in the later generation. | High | Only a phone that has just downloaded completely in the current generation re-shares automatically. Local copies are never shared in bulk (`shareAll` and the join prompt skip them), and sharing one alone shows a warning. Tested, both reset and join. |
+| A full family could not reset (pre-sync answered `sync_first`). Deleted child rows filled the 100-row quota for good. | High | Reset is always allowed. A family over quota still downloads, so deletions arrive. Only active children count toward the quota, and deleted ids and tombstones are pruned to the newest 100. Tested: reset when full, and sharing again after 150 deletions. |
+| The word-review clamp could pin a word in the future after one far-future reading. | Medium | The `L.event` rule: an implausible future anchor is not used, and a `peak` over retained reviews blocks credit after a clock step back. Tested: re-anchoring and credit resuming, with no stale-review credit. |
+| A missing sync script either left changes unqueued, threw a ReferenceError, or permanently detached children. | Low | When a script is missing, shared children become local copies and the download cursor restarts, so the family copies return once the scripts load. The page tolerates a missing `SparkSync`. Tested for each script. |
+| Revoked devices could push active devices out of the 50-row list. | Low | Active devices are listed first. |
+| A round could finish after settings opened, leaving a stale form. | Low | A finished round re-draws the open settings form when children changed. |
+
 ## 17. Exact blockers before production
 1. **Product decisions:**
    - (a) whether tutor notes (`notes`) and the parent teaching log (`log`) should sync. Both are provider-generated text; V1 keeps them local.
@@ -263,6 +274,7 @@ The review's doc corrections are applied: metadata list, padding, Worker re-orde
 3. **Key rotation in place.** V1 rotation is a family reset (server data is deleted and phones re-share). Re-encryption without a reset is not implemented.
 4. **Withheld-record detection on new phones.** It would need client-signed heads.
 5. A real-phone trial: two phones, airplane mode, and storage pressure on iOS Safari (where localStorage is not guaranteed under pressure).
+6. **The last repairs (§16, second table) were verified by tests only.** The reset and generation paths were fixed twice. Before any merge they should get one more independent review.
 
 ## 18. Recommended phases after this candidate
 1. Product decisions in §17.1; real-phone trial in `sync-lab`.

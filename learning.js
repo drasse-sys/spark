@@ -85,7 +85,12 @@
     const w=(memory.items||[]).find(w=>w.id===r?.wordId);if(!w||!Number.isSafeInteger(r.t))return null;
     // A review older than the last one (a clock step back, or a merged late record) is placed at the last review time,
     // as `event` clamps skill evidence: the last-review anchor never moves back, so no later review gains delay credit.
-    const now=Math.max(r.t,w.lastAt||0),s=r.s,delayed=r.mayDelay!==false&&!!w.lastAt&&now-w.lastAt>=DAY;
+    // Clock boundary, as in `event`. A last review more than CLOCK_SKEW after this one is not an anchor: the review keeps its
+    // own time and earns no credit, so one bad reading cannot pin the word in the future. `peak` (the latest retained review)
+    // blocks credit while the anchor sits more than CLOCK_SKEW behind it, so a step back can never manufacture a delay.
+    const last=w.lastAt||0,peak=Math.max(last,...(w.ev||[]).map(e=>Number.isSafeInteger(e?.t)?e.t:0));
+    const ahead=last>r.t+CLOCK_SKEW,jump=peak<=r.t+CLOCK_SKEW&&peak>last+CLOCK_SKEW;
+    const now=ahead?r.t:Math.max(r.t,last),s=r.s,delayed=!ahead&&!jump&&r.mayDelay!==false&&!!last&&now-last>=DAY;
     if(r.ok&&s<=1&&r.c!=='gjetter'&&delayed)w.box=Math.min(5,(w.box||1)+1);else if(!r.ok||s>=3)w.box=Math.max(1,(w.box||1)-1);
     w.box ||=1;w.lastAt=now;w.due=now+SPACING[w.box-1]*DAY;
     w.ev ||= [];w.ev.push({t:now,s,ok:r.ok,delayed});w.ev=w.ev.slice(-8);

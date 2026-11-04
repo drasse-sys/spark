@@ -264,7 +264,8 @@
     function fork(kid){mat(kid);detach(kid);}
     // Stored sync data that cannot be folded (corrupted beyond the load-time shape check) costs only this child's sharing.
     function mat(kid){try{return materialize(kid);}catch{detach(kid);return false;}}
-    function shareAll(){let n=0;for(const kid of d.kids())if(share(kid))n++;return n;}
+    // Local copies (forks) are never shared in bulk: one may be a child the family deleted while this phone was away.
+    function shareAll(){let n=0;for(const kid of d.kids())if(!kid.fork&&share(kid))n++;return n;}
     async function create({code}){
       const raw=d.random(16),text=await keyText(d.subtle,raw),k=await deriveKeys(d.subtle,raw);
       const r=await d.request('/sync/enroll',{v:1,mode:'create',code:String(code||''),proof:k.proof});
@@ -299,14 +300,16 @@
       return {ok:true,key:text};
     }
     async function reset({code}){
-      // Apply every deletion this phone can still receive first, so its re-shared children are only living ones.
-      if(state().enabled){const r=await sync();if(!r.ok&&!['rejoin','revoked'].includes(r.code))return {ok:false,code:'sync_first'};}
+      // Reset is always possible (it is the way out of a lost key, a full family or a corrupt stored key). Only a phone that
+      // has just completed a download in the current generation (so every deletion it can receive is applied) shares its
+      // children again automatically. Otherwise they stay here as local copies, shared again only by an explicit choice.
+      let fresh=false;if(state().enabled){const r=await sync();fresh=r.ok||r.code==='quota';}
       const raw=d.random(16),text=await keyText(d.subtle,raw),k=await deriveKeys(d.subtle,raw);
-      const r=await d.request('/sync/admin',{v:1,op:'reset',code:String(code||''),proof:k.proof});
+      let r;try{r=await d.request('/sync/admin',{v:1,op:'reset',code:String(code||''),proof:k.proof});}catch{return {ok:false,code:'offline'};}
       if(r.status!==200||!ID.test(r.data?.gen))return {ok:false,code:r.data?.code||'error',error:r.data?.error||''};
-      const before=shared(),result=await activate(text,k,r.data);
+      const before=fresh?shared():[],result=await activate(text,k,r.data);
       // Children still here (not removed by a verified tombstone) are shared again under new ids.
-      if(result.ok){for(const kid of before)if(d.kids().includes(kid))share(kid);d.saveKids();}
+      if(result.ok&&before.length){for(const kid of before)if(d.kids().includes(kid))share(kid);d.saveKids();}
       return result;
     }
     function hide(kid){
@@ -415,7 +418,8 @@
         const s=state();if(!s.enabled)return {ok:false,code:'off'};
         let k;try{k=await keys(s);}catch{return fail('key');}
         try{
-          const round=async()=>(await push(state(),k))||(await pull(state(),k));
+          // A full family still downloads (so deletions arrive); the quota status is reported after the download.
+          const round=async()=>{const a=await push(state(),k);if(a&&a.code!=='quota')return a;return (await pull(state(),k))||a;};
           let p=await round();
           // A phone that was paired again has a new device id: it re-enrols itself with the key it already holds.
           // If the family was reset meanwhile, the stored key no longer matches and the parent must enter the new one.

@@ -157,7 +157,9 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
 ============================================== */
 
 // SYNC1: if sync.js or sync-ui.js did not load, these no-op fallbacks keep the app working exactly as before.
-for(const [name,fn] of Object.entries({syncInitKids:()=>{},syncRecord:()=>{},syncProfile:()=>{},syncSoon:()=>{},syncHTML:()=>'',bindSync:()=>{},syncResetChildLearning:()=>{},
+// Shared children are kept as local copies (their unsent changes cannot be queued without sync), and the download
+// cursor restarts, so the family copies come back once the scripts load again. Nothing is lost.
+for(const [name,fn] of Object.entries({syncInitKids:()=>{let n=0;for(const k of kids)if(k.sync){delete k.sync;delete k.id;k.fork=true;n++;}if(n){try{const s=JSON.parse(localStorage.getItem('spark_sync')||'null');if(s){s.cursor=0;localStorage.setItem('spark_sync',JSON.stringify(s));}}catch{}}},syncRecord:()=>{},syncProfile:()=>{},syncSoon:()=>{},syncHTML:()=>'',bindSync:()=>{},syncResetChildLearning:()=>{},
   syncNoteHTML:()=>'<div class="note info"><strong>📱 Flere telefoner:</strong> den samme Spark-serveren kan brukes av Olav, lillebror og en tredje telefon. Hver telefon pares én gang. Profiler og økthistorikk er foreløpig lokale på hver telefon og synkroniseres ikke mellom enheter.</div>'}))
   if(typeof window[name]!=='function')window[name]=fn;
 const LS = { kids:'spark_kids', active:'spark_active', voice:'spark_voice',

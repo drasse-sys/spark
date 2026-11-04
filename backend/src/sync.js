@@ -46,7 +46,7 @@ async function syncMember(db,fam,deviceId,gen){
 }
 // Tombstones of every generation, for a phone that proved the key or the family code (bounded by the child-row limit).
 async function syncTombstones(db,fam){
-  const rows=await db.prepare('SELECT child_id AS child, gen, record_id AS id, iv, ct FROM sync_tombstones WHERE family_id=?1 ORDER BY deleted_at LIMIT 100').bind(fam).all();
+  const rows=await db.prepare('SELECT child_id AS child, gen, record_id AS id, iv, ct FROM sync_tombstones WHERE family_id=?1 ORDER BY deleted_at DESC, child_id LIMIT 100').bind(fam).all();
   return rows.results.map(r=>({child:r.child,gen:r.gen,id:r.id,iv:r.iv,ct:r.ct}));
 }
 const SYNC_CODE_TEXT={not_enrolled:'enroll',revoked:'revoked',family_changed:'changed'};
@@ -120,7 +120,8 @@ async function syncHandle(request,env,url,c,h){
         const st=status.get(r.child);
         if(r.kind==='base'){
           if(st===undefined){
-            if(active>=SYNC_LIMITS.children||total>=SYNC_LIMITS.childRows){decided.set(r.id,'quota');continue;}
+            // Only active children count: deleted ids are bounded separately (newest 100 kept, see delete-child).
+            if(active>=SYNC_LIMITS.children){decided.set(r.id,'quota');continue;}
             status.set(r.child,'active');created.push(r.child);active++;total++;
           }else{decided.set(r.id,st==='deleted'?'child_deleted':'child_exists');continue;}
         }else if(st!=='active'){decided.set(r.id,st==='deleted'?'child_deleted':'child_unknown');continue;}
@@ -172,7 +173,7 @@ async function syncHandle(request,env,url,c,h){
     if(route==='devices'){
       if(!syncKeys(b,['v','gen']))return error(400,'bad_request','bad');
       const m=await syncMember(db,fam,device.deviceId,b.gen);if(!m.row)return error(m.status,m.code,SYNC_CODE_TEXT[m.code]);
-      const rows=await db.prepare('SELECT device_id AS device, status, enrolled_at AS enrolledAt, seen_day AS seenDay FROM sync_devices WHERE family_id=?1 ORDER BY enrolled_at, device_id LIMIT 50').bind(fam).all();
+      const rows=await db.prepare('SELECT device_id AS device, status, enrolled_at AS enrolledAt, seen_day AS seenDay FROM sync_devices WHERE family_id=?1 ORDER BY status=\'active\' DESC, enrolled_at, device_id LIMIT 50').bind(fam).all();
       return reply({v:1,devices:rows.results.map(r=>({device:r.device,status:r.status,enrolledAt:Number(r.enrolledAt),seenDay:Number(r.seenDay),self:r.device===device.deviceId}))});
     }
     // route === 'admin': destructive or family-wide operations. Each needs the family code, which phones do not store,
@@ -215,7 +216,11 @@ async function syncHandle(request,env,url,c,h){
       db.prepare("UPDATE sync_children SET status='deleted', deleted_at=?3 WHERE family_id=?1 AND child_id=?2").bind(fam,b.child,now),
       db.prepare("INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, head+1, ?2, ?3, 'tombstone', ?4, 1, ?5, ?6 FROM sync_families WHERE family_id=?1 AND NOT EXISTS (SELECT 1 FROM sync_records WHERE family_id=?1 AND record_id=?2)").bind(fam,b.record.id,b.child,now,b.record.iv,b.record.ct),
       db.prepare(`UPDATE sync_families SET head=MAX(head,COALESCE((SELECT MAX(seq) FROM sync_records WHERE family_id=?1),0)),
-          record_count=(SELECT COUNT(*) FROM sync_records WHERE family_id=?1), byte_count=(SELECT COALESCE(SUM(LENGTH(ct)),0) FROM sync_records WHERE family_id=?1) WHERE family_id=?1`).bind(fam)
+          record_count=(SELECT COUNT(*) FROM sync_records WHERE family_id=?1), byte_count=(SELECT COALESCE(SUM(LENGTH(ct)),0) FROM sync_records WHERE family_id=?1) WHERE family_id=?1`).bind(fam),
+      // Bounded: the newest 100 deleted ids and tombstones are kept. A phone offline for longer than 100 deletions that still
+      // holds an older one gets child_unknown and keeps a local copy, which is never shared again automatically.
+      db.prepare("DELETE FROM sync_children WHERE family_id=?1 AND status='deleted' AND child_id NOT IN (SELECT child_id FROM sync_children WHERE family_id=?1 AND status='deleted' ORDER BY deleted_at DESC, child_id LIMIT 100)").bind(fam),
+      db.prepare('DELETE FROM sync_tombstones WHERE family_id=?1 AND child_id NOT IN (SELECT child_id FROM sync_tombstones WHERE family_id=?1 ORDER BY deleted_at DESC, child_id LIMIT 100)').bind(fam)
     ]);
     return reply({v:1,deleted:true});
   }catch{

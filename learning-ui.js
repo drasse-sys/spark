@@ -40,7 +40,7 @@ function recordLearning(ok,verified,kind='task',error='',confidence=''){
   const s=ensureLearning(),t=s.task,input={id:s.id+':'+t.id+':'+t.attempts,t:Date.now(),sid:s.id,s:t.s,ok,verified,k:kind,e:error,c:confidence};
   const e=L.event(kid().learning,t.skill,input);
   // SYNC1: a shared child also queues the observed input (not the derived state) for the family log.
-  if(e){s.events.push({...e,skill:t.skill});L.boundSession(s);if(kid().sync)syncRecord(kid(),SparkSync.skillOp(t.skill,input,e));saveKids();}
+  if(e){s.events.push({...e,skill:t.skill});L.boundSession(s);if(kid().sync&&globalThis.SparkSync)syncRecord(kid(),SparkSync.skillOp(t.skill,input,e));saveKids();}
   return e;
 }
 function offerTransfer(){
