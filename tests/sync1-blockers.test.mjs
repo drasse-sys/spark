@@ -655,11 +655,11 @@ test('R6: an own stream never reuses a counter after local storage was restored 
   const ada=B.kid('Ada'),w=B.addWord(ada,'katt','cat');B.reviewWord(ada,w.id,{ok:true});
   const snapshotOld=B.persisted;                                    // storage as of now
   B.reviewWord(ada,w.id,{ok:true});B.reviewWord(ada,w.id,{ok:true});await B.sync();   // two more operations reach the Worker
-  const sent=ada.sync.out.n;
+  const sent=ada.sync.out.n,oldStream=ada.sync.out.s;
   B.persisted=snapshotOld;B.reload();B.state=JSON.stringify({...JSON.parse(B.state),cursor:0});   // rolled back
   assert.ok(B.kid('Ada').sync.out.n<sent);
   await B.sync();                                                   // its own records come back
-  assert.equal(B.kid('Ada').sync.out.n,sent,'the counter moved past everything the Worker already holds');
+  assert.ok(B.kid('Ada').sync.out.s!==oldStream||B.kid('Ada').sync.out.n>=sent,'a fresh stream, or a counter past everything the Worker already holds');
   B.reviewWord(B.kid('Ada'),B.kid('Ada').learning.items[0].id,{ok:true});await B.sync();await A.sync();
   assert.equal(snapshot(A),snapshot(B));
 });
@@ -885,4 +885,22 @@ test('R15: an unhide pressed while a page is being applied is not overwritten by
   assert.equal(B.engine.state().hidden.length,0,'the unhide survived the running round');
   assert.ok(B.kid('Ada'),'and the round itself went on to download the child again');void open;
   await B.sync();await A.sync();assert.equal(snapshot(A),snapshot(B));
+});
+
+test('R16: two clones that both stay in use lose at most the first concurrent operation; the second sees the clash and moves to a fresh stream',async()=>{
+  const {clock,fam,A,B,key}=await pair('r16');
+  B.addWord(B.kid('Ada'),'start','x');await B.sync();await A.sync();
+  const C=await device(fam,clock);C.persisted=B.persisted;C.state=B.state;C.reload();C.restart();assert.ok((await C.engine.join({key})).ok);
+  const w=B.kid('Ada').learning.items[0].id;
+  let made=0;
+  for(let round=0;round<3;round++){
+    // Both are online and in use, each pushing before it pulls, both recording one review between syncs.
+    B.reviewWord(B.kid('Ada'),w,{ok:true});C.reviewWord(C.kid('Ada'),w,{ok:round%2===0});made+=2;
+    for(const d of [B,C,B,C,A])assert.deepEqual(await d.sync(),{ok:true});
+  }
+  const counted=d=>d.kid('Ada').learning.items[0].ev.length;
+  assert.equal(counted(A),counted(B));assert.equal(counted(A),counted(C));
+  assert.ok(counted(A)>=Math.min(8,made-1),'only the first collision may cost an operation: '+counted(A));
+  assert.notEqual(B.kid('Ada').sync.out.s,C.kid('Ada').sync.out.s,'the clones no longer share a stream');
+  assert.equal(snapshot(A),snapshot(B));assert.equal(snapshot(A),snapshot(C));
 });

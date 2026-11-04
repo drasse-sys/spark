@@ -449,7 +449,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
       return quota?fail('quota'):null;
     }
     async function pull(s,k){
-      complete='';
+      complete='';const rebuilt=new Set();
       for(let page=0;page<LIMITS.pullPages;page++){
         // The parent can remove a child from this phone, or fetch removed children again, while a round is running. This round
         // works on its own copy of the state, so it adopts those two user decisions (before and after each request) instead of
@@ -471,19 +471,23 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           let target=kid;
           if(!target){
             if(rec.kind!=='base')continue;// a child begins with its base; nothing else can create one
-            target=d.newKid();target.id=rec.child;target.sync=emptySync();if(Object.hasOwn(s.streams,rec.child))target.sync.out={...s.streams[rec.child]};d.addKid(target);
+            target=d.newKid();rebuilt.add(target);target.id=rec.child;target.sync=emptySync();if(Object.hasOwn(s.streams,rec.child))target.sync.out={...s.streams[rec.child]};d.addKid(target);
           }else if(!target.sync)continue;// an unshared local profile never adopts family records
           if(incorporated(target.sync,rec))continue;
           // This phone's own record, stored by the Worker, whose acknowledgement never arrived: the download is the acknowledgement.
           // (Left in the queue as well it would be folded twice, once from the log and once as unsent.)
           const own=target.sync.pending.findIndex(o=>o.id===rec.id);if(own>=0)target.sync.pending.splice(own,1);
+          const ownAck=own>=0;
           // After a restore of older local storage this phone's own earlier records come back: never reuse their counters.
-          if(p.o&&target.sync.out&&p.o.s===target.sync.out.s){
+          if(p.o&&target.sync.out&&p.o.s===target.sync.out.s&&!ownAck){
             // Somebody else (a cloned or restored copy of this phone's storage) wrote to this phone's own stream. If an operation
             // waiting in the queue holds the same counter, it would be taken for a duplicate: it moves to a fresh stream, but only
             // once the download has reached the head (below), when every record this phone itself already sent has arrived and
             // left the queue. (No operation is ever sent twice to "repair" a collision: that could count it twice.)
-            if(target.sync.pending.some(o=>o.p.o&&o.p.o.s===p.o.s&&o.p.o.n===p.o.n))target.sync.clash=true;
+            // A record in this phone's own stream that it never sent (it is not in its queue, its log or behind its watermark) means
+            // a cloned or rolled-back copy is writing the same stream: from the end of this download on, new work uses a fresh stream.
+            // (A child rebuilt by this very download, e.g. after hide/unhide, meets its own old records again: those are not a clash.)
+            if(!rebuilt.has(target))target.sync.clash=true;
             if(p.o.n>target.sync.out.n)target.sync.out.n=p.o.n;
           }
           target.sync.log.push({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p});markSeen(target.sync,rec.id);changed.add(target);
