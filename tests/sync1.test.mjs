@@ -554,7 +554,7 @@ async function replayedReview(clientPatch){
 }
 test('negative control: without the seen-id check a replayed record is applied twice',async()=>{
   assert.equal(await replayedReview(),1);
-  assert.equal(await replayedReview(cut('if(seen(target.sync,rec.id))continue;')),2);
+  assert.equal(await replayedReview(cut('if(incorporated(target.sync,rec))continue;')),2);
 });
 async function fastClockCredit(clientPatch){
   const {clock,A,B}=await pairWith({clientPatch,name:'nc-ck'});

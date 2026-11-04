@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {localD1,world,family,device,snapshot,blankKid,request,L,S,DAY} from './sync-helpers.mjs';
+import {localD1,world,family,device,snapshot,reference,canon,blankKid,request,L,S,DAY,clientRealm,cut} from './sync-helpers.mjs';
 
 /* SYNC1 production-blocker burndown (B1-B5). Real Worker code, real local D1 (workerd), real client engines.
    Races are injected deterministically: the database handle given to the Worker is wrapped so that, at a chosen
@@ -309,4 +309,138 @@ test('B4: the registry is bounded (inactive rows to the newest 50, expired revoc
   assert.equal((await D.engine.join({key})).code,'quota');
   assert.ok((await C.engine.join({key})).ok,'an already known device can still re-join');
   const r=await A.engine.reset({code:fam.code});assert.ok(r.ok,'reset stays possible with a full registry');
+});
+
+/* ---------------- B3: unhide reconstructs the family state exactly once, whatever the lifetime record count ---------------- */
+// A family with children Ada and Bo, and a long history on Ada: one word reviewed `reviews` times, 40 reviews per round,
+// one day per round (so old records become final and are folded into checkpoints, as in real use).
+const cold=(dev,kid,i)=>{const sid='cs'+i,input={id:sid+':t1:'+i,t:dev.now(),sid,s:0,ok:true,verified:true,k:'cold',e:'',c:''};const v=L.event(kid.learning,'add1',input);if(v)dev.engine.enqueue(kid,S.skillOp('add1',input,v));return v;};
+async function longHistory({reviews,realm,name,stepDays=5}){
+  const clock=world(),fam=family(db,clock,'b3'+name+(n++));
+  const A=await device(fam,clock),B=await device(fam,clock,realm?{realm}:{});
+  const ada=A.kids[0];ada.name='Ada';ada.age=9;A.practice(ada,'add1');
+  const bo=blankKid('Bo');A.kids.push(bo);A.practice(bo,'add1');
+  const c=await A.engine.create({code:fam.code});assert.ok(c.ok);
+  assert.equal(A.engine.shareAll(),2);A.saveKids();assert.deepEqual(await A.sync(),{ok:true});
+  assert.ok((await B.engine.join({key:c.key})).ok);assert.deepEqual(await B.sync(),{ok:true});
+  const word=A.addWord(ada,'katt','cat');
+  let done=0;
+  while(done<reviews){
+    for(let i=0;i<40&&done<reviews;i++,done++){
+      const t=A.now();
+      if(i%4===3)cold(A,ada,done);                       // a cold check: raises totals.cold, which only counts distinct evidence
+      else{const r=L.reviewWord(ada.learning,{wordId:word.id,t,s:0,ok:done%3!==0,c:''});if(r)A.engine.enqueue(ada,{type:'word-review',t,wordId:word.id,s:0,ok:done%3!==0,c:'',d:r.delayed});}
+      clock.advance(1000);
+    }
+    A.saveKids();assert.deepEqual(await A.sync(),{ok:true});
+    clock.advance(stepDays*DAY);
+    if(done%400===0)assert.deepEqual(await B.sync(),{ok:true});
+  }
+  assert.deepEqual(await B.sync(),{ok:true});
+  return {clock,fam,A,B,key:c.key,word};
+}
+const adaView=dev=>JSON.stringify(dev.kids.filter(k=>k.name==='Ada').map(k=>snapshotOne(k)));
+const snapshotOne=k=>{const s=JSON.parse(snapshot({kids:[k]}));return s;};
+test('B3 (reproducer, lowered retention bound): with more records than the dedupe window, hide → unhide re-applies old reviews',async()=>{
+  const small=clientRealm(cut('seen:2000','seen:40'));
+  const {A,B}=await longHistory({reviews:240,realm:small,name:'low'});
+  assert.equal(snapshot(A),snapshot(B),'converged before hiding');
+  assert.deepEqual(B.engine.hide(B.kid('Bo')),{ok:true});
+  B.engine.unhide();assert.deepEqual(await B.sync(),{ok:true});
+  assert.ok(B.kid('Bo'),'Bo is back');
+  assert.equal(snapshot(B),snapshot(A),'exactly the family state: no old record applied twice');
+  assert.equal(adaView(B),adaView(A));
+});
+test('B3 (negative control): without the watermark the same scenario diverges',async()=>{
+  const broken=clientRealm(s=>cut('rec.seq<=(sync.wm||0)||','')(cut('seen:2000','seen:40')(s)));
+  const {A,B}=await longHistory({reviews:240,realm:broken,name:'neg'});
+  B.engine.hide(B.kid('Bo'));B.engine.unhide();await B.sync();
+  assert.notEqual(snapshot(B),snapshot(A),'the defence is what makes the difference');
+});
+test('B3: hide → restart → unhide, twice, with a local save failure in the middle: always exactly the family state; storage stays bounded',async()=>{
+  const small=clientRealm(cut('seen:2000','seen:40'));
+  const {clock,A,B}=await longHistory({reviews:360,realm:small,name:'rst'});
+  const family=snapshot(A),logOf=d=>d.kids.filter(k=>k.sync).map(k=>k.sync.log.length);
+  assert.ok(Math.max(...logOf(B))<=140,'unfolded log is bounded by the order window, not by history: '+logOf(B));
+  for(let round=0;round<2;round++){
+    assert.deepEqual(B.engine.hide(B.kid('Bo')),{ok:true});B.reload();                    // restart while hidden
+    assert.equal(B.kid('Bo'),undefined);assert.equal(snapshot(B).includes('"Bo"'),false);
+    B.engine.unhide();B.reload();                                                         // restart between unhide and the download
+    B.storageOk=false;assert.equal((await B.sync()).code,'storage','local save failure: nothing advances');
+    B.storageOk=true;B.reload();                                                          // and a restart after it
+    assert.deepEqual(await B.sync(),{ok:true});
+    assert.equal(snapshot(B),family,'round '+round+': exactly the family state, no record applied twice');
+    assert.equal(snapshot(B),await reference(A),'and equal to a fresh replay of everything the Worker stores');
+    assert.deepEqual(await B.sync(),{ok:true});assert.equal(snapshot(B),family,'idempotent');
+  }
+  // Unhide while another phone keeps working, then a plain download: still exact.
+  B.engine.hide(B.kid('Bo'));A.practice(A.kid('Ada'),'sub1');await A.sync();B.engine.unhide();await B.sync();await A.sync();
+  assert.equal(snapshot(B),snapshot(A));
+  // Replay inflates neither evidence nor mastery nor word credit.
+  const evidence=d=>JSON.stringify(canon(d.kids.map(k=>({totals:k.learning.totals,items:k.learning.items.map(w=>[w.box,w.due,w.ev.length]),skills:Object.entries(k.learning.skills).map(([id,r])=>[id,r.box,r.ev.length,r.independentAt,r.retainedAt])}))));
+  assert.equal(evidence(B),evidence(A));
+});
+// Writes `count` valid, key-sealed ops for one child straight into the Worker's D1 (the same rows a long period of pushes would
+// leave), with Worker receive times that grow with the sequence number, as they do in production. Only the setup bypasses
+// the push route; the phones under test download them through the real pull route.
+async function inject(fam,dev,childId,count,{spanDays=300}={}){
+  const st=dev.engine.state(),raw=await S.parseKey(globalThis.crypto.subtle,st.key),k=await S.deriveKeys(globalThis.crypto.subtle,raw);
+  const fid=await fidOf(fam),head=Number((await db.prepare('SELECT head FROM sync_families WHERE family_id=?1').bind(fid).first()).head);
+  const t0=dev.now(),step=Math.floor(spanDays*DAY/count),rand=n=>globalThis.crypto.getRandomValues(new Uint8Array(n));
+  const word={id:'wk-katt',word:'katt',meaning:'cat'};
+  let bytes=0,chunk=[],last=0;
+  const flush=async()=>{if(!chunk.length)return;await db.prepare("INSERT INTO sync_records (family_id, seq, record_id, child_id, kind, received_at, clock_ok, iv, ct) SELECT ?1, json_extract(value,'$.s'), json_extract(value,'$.id'), ?2, 'op', json_extract(value,'$.at'), 1, json_extract(value,'$.iv'), json_extract(value,'$.ct') FROM json_each(?3)").bind(fid,childId,JSON.stringify(chunk)).run();chunk=[];};
+  for(let i=0;i<count;i++){
+    const at=t0+(i+1)*step,after=i?t0+i*step:t0;let payload;
+    if(i===0)payload={type:'word-add',v:1,t:at,after,word};
+    else if(i%150===0)payload={type:'skill',v:1,t:at,after,skill:'add1',d:true,e:{s:0,ok:true,k:'cold',e:'',c:'',sid:'cs'+i,id:'cs'+i+':t1',verified:true}};
+    else if(i%60===0)payload={type:'session',v:1,t:at,after,session:{id:'sess'+i,startedAt:at-60000,endedAt:at,activeMs:60000,mode:'matte',events:[],reflection:'',interventions:0,interactions:[]}};
+    else payload={type:'word-review',v:1,t:at,after,wordId:word.id,s:0,ok:i%3!==0,c:'',d:true};
+    const id=S.b64url(rand(16)),rec=await S.seal(globalThis.crypto.subtle,rand,k.encKey,st.gen,{id,child:childId,kind:'op'},payload);
+    bytes+=rec.ct.length;last=at;
+    chunk.push({s:head+i+1,id,at,iv:rec.iv,ct:rec.ct});
+    if(chunk.length===250)await flush();
+  }
+  await flush();
+  await db.prepare('UPDATE sync_families SET head=head+?2, record_count=record_count+?2, byte_count=byte_count+?3 WHERE family_id=?1').bind(fid,count,bytes).run();
+  return last;
+}
+const bigFamily=async name=>{
+  const clock=world(),fam=family(db,clock,'b3big'+name+(n++));
+  const A=await device(fam,clock),B=await device(fam,clock);
+  const ada=A.kids[0];ada.name='Ada';ada.age=9;A.practice(ada,'add1');
+  const bo=blankKid('Bo');A.kids.push(bo);A.practice(bo,'add1');
+  const c=await A.engine.create({code:fam.code});assert.ok(c.ok);
+  assert.equal(A.engine.shareAll(),2);A.saveKids();assert.deepEqual(await A.sync(),{ok:true});
+  assert.ok((await B.engine.join({key:c.key})).ok);assert.deepEqual(await B.sync(),{ok:true});
+  return {clock,fam,A,B,ada};
+};
+test('B3 (real bound): more than 30,000 records on one child; "Hent fjernede barn tilbake hit" reconstructs the family state exactly, twice, across a restart',async()=>{
+  const {clock,fam,A,B,ada}=await bigFamily('x');
+  const COUNT=30080;
+  const last=await inject(fam,A,ada.id,COUNT);
+  clock.set(last+DAY);                                    // now is after the whole history (tokens last a year)
+  const total=Number((await one(fam,'SELECT COUNT(*) AS n FROM sync_records WHERE family_id=?1')).n);
+  assert.ok(total>30000,'more records than the OLD retention bound (30,000) and than the new one: '+total);
+  const catchUp=async dev=>{for(let i=0;i<12;i++){assert.deepEqual(await dev.sync(),{ok:true});if(dev.engine.state().cursor>=total)break;}assert.ok(dev.engine.state().cursor>=total,'download reached the head');};
+  await catchUp(B);
+  const truth=await reference(A);
+  assert.equal(snapshot(B),truth,'a phone that downloads the long history gets exactly the stored family state');
+  const view=d=>d.kid('Ada').learning;
+  const facts=d=>({cold:view(d).totals.cold,sessions:view(d).sessions.map(x=>x.id),word:view(d).items[0]&&{box:view(d).items[0].box,n:view(d).items[0].ev.length}});
+  const family=snapshot(B),f0=facts(B);
+  assert.ok(f0.cold>=190,'delayed cold checks counted: '+f0.cold);assert.equal(f0.sessions.length,120);
+  for(let round=0;round<2;round++){
+    assert.deepEqual(B.engine.hide(B.kid('Bo')),{ok:true});
+    if(round===1)B.reload();                                                          // restart between hide and unhide
+    B.engine.unhide();
+    assert.deepEqual(await B.sync(),{ok:true});B.reload();                              // restart half way through the download
+    await catchUp(B);
+    assert.equal(snapshot(B),family,'round '+round+': exactly the family state');
+    {const x=facts(B);assert.equal(x.cold,f0.cold,'cold credit counted once');assert.deepEqual(x.word,f0.word,'word credit counted once');assert.equal(x.sessions.join(),f0.sessions.join(),'session summaries unchanged');}
+    const maxLog=Math.max(...B.kids.filter(k=>k.sync).map(k=>k.sync.log.length));
+    assert.ok(maxLog<=1500,'local log stays bounded however long the history: '+maxLog);
+    assert.ok(JSON.stringify(B.kids).length<400000,'phone storage stays bounded: '+JSON.stringify(B.kids).length);
+  }
+  assert.equal(snapshot(B),truth);
 });

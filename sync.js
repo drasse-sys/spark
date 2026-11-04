@@ -20,7 +20,7 @@
   const ID=/^[A-Za-z0-9_-]{21}[AQgw]$/;      // 16 random bytes, canonical unpadded base64url
   const IV=/^[A-Za-z0-9_-]{16}$/;             // 12 bytes
   const B64=/^[A-Za-z0-9_-]+$/;
-  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:30000,ids:200,pending:5000});
+  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:2000,ids:200,pending:5000});
   const HELPED=['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'];
   const ERRORS=['slurv','fakta','metode','begrep','tolking'],CONFIDENCE=['sikker','usikker','gjetter'];
   const enc=new TextEncoder(),dec=new TextDecoder();
@@ -177,7 +177,10 @@
     if(!st)return false;// never fold away records of a child whose base is missing
     s.cp={st};s.log=sorted.filter(r=>orderKey(r)>horizon);return true;
   }
-  function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[]};}
+  // `wm` (watermark): every record of this child with Worker sequence <= wm is already part of `cp` or `log` (or was refused
+// on purpose). It is set only together with the data it describes, in the same kids write, and it is what makes a repeated
+// download harmless for ANY history length: `seen` is only a recent-window convenience, never the proof that a record is old.
+function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
   // Structural check of a child's stored sync data; anything malformed yields null (the caller keeps the child local).
   function normalizeSync(s){
     if(!s||typeof s!=='object'||s.v!==1||!s.cp||typeof s.cp!=='object'||!Array.isArray(s.log)||!Array.isArray(s.pending)||!Array.isArray(s.seen))return null;
@@ -190,7 +193,7 @@
     }
     const pending=[];
     for(const op of s.pending){if(!op||!ID.test(op.id)||!['base','op'].includes(op.kind))return null;const p=checkPayload(op.kind,op.p,'');if(!p)return null;pending.push({id:op.id,kind:op.kind,p});}
-    return {v:1,cp:{st},log,pending,seen:s.seen.filter(x=>typeof x==='string'&&x.length===16).slice(-LIMITS.seen),...(profile(s.profile)?{profile:profile(s.profile)}:{}),...(s.blocked===true?{blocked:true}:{})};
+    return {v:1,cp:{st},log,pending,seen:s.seen.filter(x=>typeof x==='string'&&x.length===16).slice(-LIMITS.seen),wm:Number.isSafeInteger(s.wm)&&s.wm>0?s.wm:0,...(profile(s.profile)?{profile:profile(s.profile)}:{}),...(s.blocked===true?{blocked:true}:{})};
   }
   // Local profile and learning as the child's synced state. Fields that never sync stay as they were on this phone.
   function materialize(kid){
@@ -230,8 +233,20 @@
       keyCache={text:s.key,...await deriveKeys(d.subtle,raw)};return keyCache;
     }
     const shared=()=>d.kids().filter(k=>k.sync);
-    function seen(s,id){return s.seen.includes(id.slice(0,16));}
-    function markSeen(s,id){const p=id.slice(0,16);if(!s.seen.includes(p)){s.seen.push(p);if(s.seen.length>LIMITS.seen)s.seen.splice(0,s.seen.length-LIMITS.seen);}}
+    // `seen` is a plain array in storage; a Set beside it (keyed by the array, rebuilt if the array changed behind our back)
+    // keeps the lookup O(1) for a 30,000-entry window.
+    const seenCache=new WeakMap();
+    function seenSet(s){let c=seenCache.get(s.seen);if(!c||c.n!==s.seen.length){c={set:new Set(s.seen),n:s.seen.length};seenCache.set(s.seen,c);}return c;}
+    function seen(s,id){return seenSet(s).set.has(id.slice(0,16));}
+    // A record this child has already incorporated. The watermark answers for every record at or below it, whatever the
+    // history length; `seen` and the unfolded log cover the records above it (this phone's own acknowledged pushes).
+    const incorporated=(sync,rec)=>rec.seq<=(sync.wm||0)||seen(sync,rec.id)||sync.log.some(r=>r.id===rec.id);
+    function markSeen(s,id){
+      const p=id.slice(0,16),c=seenSet(s);if(c.set.has(p))return;
+      s.seen.push(p);c.set.add(p);
+      if(s.seen.length>LIMITS.seen)for(const x of s.seen.splice(0,s.seen.length-LIMITS.seen))c.set.delete(x);
+      c.n=s.seen.length;
+    }
     // A change on a shared child. The caller saves kids in the same step, so the change and its queue entry persist together.
     function enqueue(kid,payload){
       const s=state();if(!kid?.sync||!s.enabled)return false;
@@ -369,7 +384,7 @@
             const op=kid.sync?.pending.find(o=>o.id===batch[i].id);if(!op)return;
             if(['ok','dup'].includes(res.status)&&Number.isSafeInteger(res.seq)&&Number.isSafeInteger(res.at)&&[0,1].includes(res.ck)){
               kid.sync.pending=kid.sync.pending.filter(o=>o!==op);
-              if(!seen(kid.sync,op.id)){kid.sync.log.push({seq:res.seq,id:op.id,kind:op.kind,at:res.at,ck:res.ck,p:op.p});markSeen(kid.sync,op.id);}
+              if(!incorporated(kid.sync,{seq:res.seq,id:op.id})){kid.sync.log.push({seq:res.seq,id:op.id,kind:op.kind,at:res.at,ck:res.ck,p:op.p});markSeen(kid.sync,op.id);}
             }else if(res.status==='child_deleted')blocked=true;
             else if(res.status==='child_exists'||res.status==='child_unknown'&&!full)lost=true;
             else retry=true;
@@ -400,7 +415,7 @@
             if(rec.kind!=='base')continue;// a child begins with its base; nothing else can create one
             target=d.newKid();target.id=rec.child;target.sync=emptySync();d.addKid(target);
           }else if(!target.sync)continue;// an unshared local profile never adopts family records
-          if(seen(target.sync,rec.id))continue;
+          if(incorporated(target.sync,rec))continue;
           target.sync.log.push({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p});markSeen(target.sync,rec.id);changed.add(target);
         }
         // A child the Worker reports deleted, without a tombstone this phone could verify, stays here as a local copy.
@@ -413,6 +428,14 @@
           for(const kid of shared())if(s.deleted.includes(kid.id)||s.hidden.includes(kid.id)&&!kid.sync.pending.length)d.removeKid(kid);
         }
         for(const kid of changed)if(kid.sync)mat(kid);
+        // Everything of every shared child up to `next` is now incorporated (applied here, applied before, or refused on
+        // purpose). Recorded in the same kids write as the records themselves.
+        for(const kid of shared())kid.sync.wm=Math.max(kid.sync.wm||0,data.next);
+        // Storage stays bounded however long the history: records whose order is final relative to what this page delivered
+        // (later records have a receive time at least as late as the last one seen here, give or take the clock tolerance)
+        // are folded into the checkpoint page by page, not only at the end.
+        const lastAt=data.records.reduce((m,r)=>Math.max(m,r.at),0);
+        if(lastAt>0)for(const kid of changed)if(kid.sync){try{checkpoint(kid.sync,lastAt-WINDOW-SKEW);}catch{detach(kid);}}
         if(!d.saveKids())return fail('storage');
         s.cursor=data.next;s.serverTime=data.serverNow;
         if(!save(s))return fail('storage');
