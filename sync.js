@@ -20,7 +20,7 @@
   const ID=/^[A-Za-z0-9_-]{21}[AQgw]$/;      // 16 random bytes, canonical unpadded base64url
   const IV=/^[A-Za-z0-9_-]{16}$/;             // 12 bytes
   const B64=/^[A-Za-z0-9_-]+$/;
-  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:10000,streams:64,holes:256,ids:200,pending:5000});
+  const LIMITS=Object.freeze({opCt:32768,baseCt:262144,pushRecords:40,pushBytes:500000,pullPages:40,seen:10000,streams:1024,holes:256,ids:200,pending:5000});
   const HELPED=['Tallinje','Dele opp','Tegne','Hint','Prøve igjen'];
   const ERRORS=['slurv','fakta','metode','begrep','tolking'],CONFIDENCE=['sikker','usikker','gjetter'];
   const enc=new TextEncoder(),dec=new TextDecoder();
@@ -144,19 +144,26 @@
   const alias=st=>st.meta.alias ||= {};
   const later=(t,id,cur)=>!cur||t>cur.t||t===cur.t&&id>cur.id;
   // Replay defence. Each v2 operation carries its author's stream and counter (authenticated, see checkPayload). The fold state
-  // keeps, per stream, the contiguous prefix it has applied (`h`) and the few counters applied out of order above it (`x`,
-  // at most LIMITS.holes). An operation at or below `h`, or already in `x`, is a duplicate and is ignored, whatever sequence
-  // number or receive time the relay gave it. The record lives in the checkpoint state, so it survives compaction, restart,
-  // hide/unhide and every fold; it is a few integers per stream, not an id per operation. Returns whether `p` is new.
+  // keeps, per stream, the counters it has applied as sorted disjoint intervals `r` (a contiguous history is ONE interval; a
+  // counter that has not arrived yet leaves a gap). An operation whose counter is inside an interval is a duplicate and is ignored,
+  // whatever sequence number or receive time the relay gave it, and in whatever order the fold meets the operations. The record
+  // lives in the checkpoint state, so it survives compaction, restart, hide/unhide and every fold. It is a handful of integers
+  // per stream, not an id per operation. At most LIMITS.holes intervals are kept: beyond that the smallest gap is treated as
+  // applied (only a relay that keeps hundreds of one author's operations back can reach it, and it only costs those operations,
+  // never inflates). In-order and out-of-order operations are never refused for want of room. Returns whether `p` is new.
   function firstUse(st,p){
     if(p.v!==2)return true;
     const vc=st.meta.vc ||= {},{s,n}=p.o;
     let e=Object.hasOwn(vc,s)?vc[s]:null;
-    if(!e){if(Object.keys(vc).length>=LIMITS.streams)return false;e=vc[s]={h:0,x:[]};}
-    if(n<=e.h||e.x.includes(n))return false;
-    if(n===e.h+1){e.h=n;while(e.x.length&&e.x[0]===e.h+1)e.h=e.x.shift();return true;}
-    if(e.x.length>=LIMITS.holes)return false;
-    e.x.push(n);e.x.sort((a,b)=>a-b);return true;
+    if(!e){if(Object.keys(vc).length>=LIMITS.streams)return false;e=vc[s]={r:[]};}
+    const r=e.r;let i=0;
+    while(i<r.length&&r[i][1]<n-1)i++;
+    if(i<r.length&&r[i][0]<=n&&n<=r[i][1])return false;
+    if(i<r.length&&r[i][1]===n-1){r[i][1]=n;if(i+1<r.length&&r[i+1][0]===n+1){r[i][1]=r[i+1][1];r.splice(i+1,1);}}
+    else if(i<r.length&&r[i][0]===n+1)r[i][0]=n;
+    else r.splice(i,0,[n,n]);
+    while(r.length>LIMITS.holes){let best=Infinity,at=1;for(let k=1;k<r.length;k++){const gap=r[k][0]-r[k-1][1];if(gap<best){best=gap;at=k;}}r[at-1][1]=r[at][1];r.splice(at,1);}
+    return true;
   }
   // One record applied to a fold state {learning, meta:{profile, helped, vc}}; null until the base arrives.
   function apply(st,rec,p){
@@ -212,7 +219,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
     if(st&&st.meta.vc!==undefined){
       const vc=st.meta.vc;
       if(!vc||typeof vc!=='object'||Array.isArray(vc)||Object.keys(vc).length>LIMITS.streams)return null;
-      for(const [id,e] of Object.entries(vc))if(!STREAM.test(id)||!exactKeys(e,['h','x'])||!Number.isSafeInteger(e.h)||e.h<0||!Array.isArray(e.x)||e.x.length>LIMITS.holes||!e.x.every((n,i)=>Number.isSafeInteger(n)&&n>e.h+1&&(!i||n>e.x[i-1])))return null;
+      for(const [id,e] of Object.entries(vc))if(!STREAM.test(id)||!exactKeys(e,['r'])||!Array.isArray(e.r)||e.r.length>LIMITS.holes||!e.r.every((x,k)=>Array.isArray(x)&&x.length===2&&Number.isSafeInteger(x[0])&&Number.isSafeInteger(x[1])&&x[0]>=1&&x[0]<=x[1]&&(!k||x[0]>=e.r[k-1][1]+2)))return null;
     }
     if(s.out!==undefined&&!(exactKeys(s.out,['s','n'])&&STREAM.test(s.out.s)&&Number.isSafeInteger(s.out.n)&&s.out.n>=0&&s.out.n<=2147483647))return null;
     const log=[];
@@ -246,14 +253,21 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
   //      kids() -> array, saveKids() -> bool, addKid(kid), removeKid(kid), newKid(profile)}
   function createEngine(d){
     // `complete`: the generation whose download the last round finished to the head (not stopped by the page budget).
-    let keyCache=null,running=null,complete='';
+    let keyCache=null,running=null,complete='',settled=false;
     const newId=()=>b64url(d.random(16));
+    // The authoring stream of children removed from this phone ("Fjern fra denne telefonen"), so fetching them back continues the
+    // same stream instead of starting a new one each time (the replay record per child is bounded in streams).
+    function cleanStreams(v){
+      const out={};if(!v||typeof v!=='object'||Array.isArray(v))return out;
+      for(const [id,o] of Object.entries(v).slice(-LIMITS.ids))if(ID.test(id)&&exactKeys(o,['s','n'])&&STREAM.test(o.s)&&Number.isSafeInteger(o.n)&&o.n>=0&&o.n<=2147483647)out[id]={s:o.s,n:o.n};
+      return out;
+    }
     function state(){
       let s;try{s=JSON.parse(d.loadState()||'null');}catch{s=null;}
       const ok=s&&s.v===1&&typeof s.key==='string'&&ID.test(s.gen);
       return {v:1,enabled:!!ok,key:ok?s.key:'',gen:ok?s.gen:'',cursor:ok&&Number.isSafeInteger(s?.cursor)&&s.cursor>=0?s.cursor:0,serverTime:ok&&time(s.serverTime)?s.serverTime:0,
         hidden:Array.isArray(s?.hidden)?s.hidden.filter(x=>ID.test(x)).slice(-LIMITS.ids):[],deleted:Array.isArray(s?.deleted)?s.deleted.filter(x=>ID.test(x)).slice(-LIMITS.ids):[],
-        status:typeof s?.status==='string'?s.status.slice(0,20):'',lastSync:time(s?.lastSync)?s.lastSync:0,lastT:time(s?.lastT)?s.lastT:0,undecryptable:Number.isSafeInteger(s?.undecryptable)?s.undecryptable:0};
+        status:typeof s?.status==='string'?s.status.slice(0,20):'',lastSync:time(s?.lastSync)?s.lastSync:0,lastT:time(s?.lastT)?s.lastT:0,undecryptable:Number.isSafeInteger(s?.undecryptable)?s.undecryptable:0,streams:cleanStreams(s?.streams)};
     }
     const save=s=>d.saveState(JSON.stringify(s));
     async function keys(s){
@@ -344,7 +358,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
       keyCache={text,...k};
       // Same generation (a re-join): what this phone already applied, removed or saw deleted stays valid.
       const same=old.enabled&&old.gen===data.gen;
-      const s={...old,v:1,key:text,gen:data.gen,cursor:same?old.cursor:0,serverTime:time(data.serverNow)?data.serverNow:0,hidden:same?old.hidden:[],deleted:same?old.deleted:[],status:'',lastSync:0,undecryptable:same?old.undecryptable:0};
+      const s={...old,v:1,key:text,gen:data.gen,cursor:same?old.cursor:0,serverTime:time(data.serverNow)?data.serverNow:0,hidden:same?old.hidden:[],deleted:same?old.deleted:[],streams:same?old.streams:{},status:'',lastSync:0,undecryptable:same?old.undecryptable:0};
       if(!save(s)||!d.saveKids())return {ok:false,code:'storage'};
       return {ok:true,key:text};
     }
@@ -365,7 +379,9 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
     }
     function hide(kid){
       const s=state();if(!kid.sync)return {ok:false,code:'not_shared'};if(kid.sync.pending.length)return {ok:false,code:'pending'};
-      s.hidden=[...s.hidden.filter(x=>x!==kid.id),kid.id].slice(-LIMITS.ids);if(!save(s))return {ok:false,code:'storage'};
+      s.hidden=[...s.hidden.filter(x=>x!==kid.id),kid.id].slice(-LIMITS.ids);
+      if(kid.sync.out){const keep={...s.streams};delete keep[kid.id];keep[kid.id]={s:kid.sync.out.s,n:kid.sync.out.n};s.streams=cleanStreams(Object.fromEntries(Object.entries(keep).slice(-LIMITS.ids)));}
+      if(!save(s))return {ok:false,code:'storage'};
       d.removeKid(kid);d.saveKids();return {ok:true};
     }
     function unhide(){const s=state();s.hidden=[];s.cursor=0;return save(s);}
@@ -444,7 +460,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
         if(adopt())continue;
         const data=r.data;
         if(r.status!==200||!Array.isArray(data?.records)||!Number.isSafeInteger(data.next)||data.next<s.cursor||!time(data.serverNow)||!Array.isArray(data.children))return stop(r);
-        const changed=new Set();
+        const changed=new Set(),rekey=new Map();
         for(const rec of data.records){
           if(!rec||!Number.isSafeInteger(rec.seq)||rec.seq<=s.cursor||rec.seq>data.next||!Number.isSafeInteger(rec.at)||![0,1].includes(rec.ck))return fail('unavailable');
           if(s.deleted.includes(rec.child)||s.hidden.includes(rec.child))continue;
@@ -455,14 +471,23 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           let target=kid;
           if(!target){
             if(rec.kind!=='base')continue;// a child begins with its base; nothing else can create one
-            target=d.newKid();target.id=rec.child;target.sync=emptySync();d.addKid(target);
+            target=d.newKid();target.id=rec.child;target.sync=emptySync();if(Object.hasOwn(s.streams,rec.child))target.sync.out={...s.streams[rec.child]};d.addKid(target);
           }else if(!target.sync)continue;// an unshared local profile never adopts family records
           if(incorporated(target.sync,rec))continue;
           // This phone's own record, stored by the Worker, whose acknowledgement never arrived: the download is the acknowledgement.
           // (Left in the queue as well it would be folded twice, once from the log and once as unsent.)
           const own=target.sync.pending.findIndex(o=>o.id===rec.id);if(own>=0)target.sync.pending.splice(own,1);
           // After a restore of older local storage this phone's own earlier records come back: never reuse their counters.
-          if(p.o&&target.sync.out&&p.o.s===target.sync.out.s&&p.o.n>target.sync.out.n)target.sync.out.n=p.o.n;
+          if(p.o&&target.sync.out&&p.o.s===target.sync.out.s){
+            // Somebody else (a cloned or restored copy of this phone's storage) wrote to this phone's own stream. If an operation
+            // waiting in the queue holds the same counter, it would be taken for a duplicate: it gets a fresh stream below.
+            if(target.sync.pending.some(o=>o.p.o&&o.p.o.s===p.o.s&&o.p.o.n===p.o.n))rekey.set(target,rekey.get(target)||[]);
+            // The same counter was already sent by this phone and is in its log: the fold keeps whichever of the two sorts first and
+            // drops the other, the same way on every phone. If that is ours, the operation is sent again under a fresh stream.
+            const mine=target.sync.log.find(r=>r.p.o&&r.p.o.s===p.o.s&&r.p.o.n===p.o.n&&r.id!==rec.id);
+            if(mine&&order({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p},mine)<0)rekey.set(target,[...(rekey.get(target)||[]),mine]);
+            if(p.o.n>target.sync.out.n)target.sync.out.n=p.o.n;
+          }
           target.sync.log.push({seq:rec.seq,id:rec.id,kind:rec.kind,at:rec.at,ck:rec.ck,p});markSeen(target.sync,rec.id);changed.add(target);
         }
         // A child the Worker reports deleted, without a tombstone this phone could verify, stays here as a local copy.
@@ -474,6 +499,13 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           // persisted (sync state saved, then spark_kids failed to save) is removed now; its records are skipped above.
           for(const kid of shared())if(s.deleted.includes(kid.id)||s.hidden.includes(kid.id)&&!kid.sync.pending.length)d.removeKid(kid);
         }
+        // Unsent operations whose counters were taken by another writer of the same stream move to a new stream of this phone.
+        for(const [kid,lostOps] of rekey)if(kid.sync&&kid.sync.out){
+          const old=kid.sync.out.s,fresh={s:b64url(d.random(9)),n:0};
+          for(const op of kid.sync.pending)if(op.p.o&&op.p.o.s===old){fresh.n++;op.p={...op.p,o:{s:fresh.s,n:fresh.n}};}
+          for(const l of lostOps){fresh.n++;kid.sync.pending.push({id:newId(),kind:'op',p:{...l.p,o:{s:fresh.s,n:fresh.n}}});}
+          kid.sync.out=fresh;
+        }
         for(const kid of changed)if(kid.sync)mat(kid);
         // Everything of every shared child up to `next` is now incorporated (applied here, applied before, or refused on
         // purpose). Recorded in the same kids write as the records themselves.
@@ -484,6 +516,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
         const lastAt=data.records.reduce((m,r)=>Math.max(m,r.at),0);
         if(lastAt>0)for(const kid of changed)if(kid.sync){try{checkpoint(kid.sync,lastAt-WINDOW-SKEW);}catch{detach(kid);}}
         if(!d.saveKids())return fail('storage');
+        if(adopt())continue;      // an unhide arrived while this page was being applied: keep its reset cursor
         s.cursor=data.next;s.serverTime=data.serverNow;
         if(!save(s))return fail('storage');
         if(!data.more){
@@ -503,7 +536,13 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
         let k;try{k=await keys(s);}catch{return fail('key');}
         try{
           // A full family still downloads (so deletions arrive); the quota status is reported after the download.
-          const round=async()=>{const a=await push(state(),k);if(a&&a.code!=='quota')return a;return (await pull(state(),k))||a;};
+          // The first round after this phone's storage was loaded downloads before it uploads, until it has reached the head: its
+          // own earlier records (after a restore of older storage) and anyone else's use of its stream are then seen before it
+          // sends anything, so no queued operation goes out with a counter that is already taken.
+          const round=async()=>{
+            if(!settled){const a=await pull(state(),k);if(a)return a;if(complete!==state().gen)return null;settled=true;}
+            const a=await push(state(),k);if(a&&a.code!=='quota')return a;return (await pull(state(),k))||a;
+          };
           let p=await round();
           // A phone that was paired again has a new device id: it re-enrols itself with the key it already holds.
           // If the family was reset meanwhile, the stored key no longer matches and the parent must enter the new one.

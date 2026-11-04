@@ -615,32 +615,40 @@ test('R4: the operation identity is authenticated: an altered identity, record i
   assert.equal(S.checkPayload('op',{...base,v:1,o:{s:'AAAAAAAAAAAA',n:1}},''),null,'a v1 operation carries no identity field');
   assert.equal(S.checkPayload('base',{type:'base',v:2,t:1,after:0},''),null);
 });
-test('R5: the replay record is bounded and exact: contiguous prefix, bounded out-of-order set, junk cannot grow it, corrupt stored state is a local copy',async()=>{
+test('R5: the replay record is bounded and exact: intervals per stream, no refusal for want of room, bounded junk, corrupt stored state is a local copy',async()=>{
   const st0={learning:L.empty(),meta:{profile:{name:'x',age:8,interests:'',readAloud:false,t:1,id:'A'.repeat(21)+'A'},helped:{},alias:{}}};
   const rec=(id,seq)=>({id,seq,kind:'op',at:5000,ck:1});
-  const word={id:'w1',word:'katt',meaning:'cat'};
   const ADD=(n,s='AAAAAAAAAAAA')=>({type:'word-add',v:2,o:{s,n},t:1000+n,after:0,word:{id:'w'+s+n,word:'ord'+s+n,meaning:'m'+n}});
   const run=(ops)=>{let st=JSON.parse(JSON.stringify(st0));for(const [i,p] of ops.entries())st=S.apply(st,rec('I'.repeat(21)+'A',i),S.checkPayload('op',p,''));return st;};
-  // Contiguous, out of order, duplicate and replayed: each counter counts once.
+  const R=(st,s='AAAAAAAAAAAA')=>JSON.stringify(st.meta.vc[s].r);
+  // Contiguous, out of order, duplicate and replayed: each counter counts once, and the record collapses into one interval.
   let st=run([ADD(1),ADD(2),ADD(2),ADD(1),ADD(4),ADD(3),ADD(3),ADD(4),ADD(5)]);
-  assert.equal(st.learning.items.length,5);assert.equal(JSON.stringify(st.meta.vc.AAAAAAAAAAAA),JSON.stringify({h:5,x:[]}),'out-of-order counters collapse into the prefix');
+  assert.equal(st.learning.items.length,5);assert.equal(R(st),'[[1,5]]');
+  // A late counter is a gap, not a refusal; it merges when it arrives; a replay of anything inside an interval is ignored.
+  st=run([ADD(1),ADD(3),ADD(4),ADD(5)]);assert.equal(R(st),'[[1,1],[3,5]]');
+  st=run([ADD(1),ADD(3),ADD(4),ADD(5),ADD(2),ADD(4),ADD(2)]);assert.equal(R(st),'[[1,5]]');assert.equal(st.learning.items.length,5);
+  // 1,000 successors of one late operation do not make anything be refused (this was the evidence-loss case).
+  const many=[ADD(1)];for(let i=3;i<=1100;i++)many.push(ADD(i));many.push(ADD(2));
+  st=run(many);assert.equal(R(st),'[[1,1100]]');
   // Separate streams are independent.
   st=run([ADD(1),ADD(1,'BBBBBBBBBBBB'),ADD(1),ADD(1,'BBBBBBBBBBBB')]);assert.equal(st.learning.items.length,2);
-  // Junk far above the prefix is held in a bounded set and then refused; the genuine next counter always gets in.
-  const junk=[];for(let i=0;i<S.LIMITS.holes+20;i++)junk.push(ADD(1000+i*2));
-  st=run([...junk,ADD(1),ADD(2)]);assert.equal(st.meta.vc.AAAAAAAAAAAA.x.length,S.LIMITS.holes);assert.equal(st.meta.vc.AAAAAAAAAAAA.h,2,'in-order operations are never blocked by junk');
+  // Junk far above the prefix is held in at most LIMITS.holes intervals; the genuine next counters are still accepted.
+  const junk=[];for(let i=0;i<S.LIMITS.holes+40;i++)junk.push(ADD(1000+i*3));
+  st=run([...junk,ADD(1),ADD(2)]);assert.ok(JSON.parse(R(st)).length<=S.LIMITS.holes,'bounded');assert.equal(JSON.parse(R(st))[0][0],1);
+  assert.equal(JSON.stringify(JSON.parse(R(st))[0]),'[1,2]','in-order operations are never refused');
   // The number of streams is bounded too.
-  const many=[];for(let i=0;i<S.LIMITS.streams+10;i++)many.push(ADD(1,String(i).padStart(12,'S')));
-  assert.equal(Object.keys(run(many).meta.vc).length,S.LIMITS.streams);
+  const streams=[];for(let i=0;i<S.LIMITS.streams+10;i++)streams.push(ADD(1,String(i).padStart(12,'S')));
+  assert.equal(Object.keys(run(streams).meta.vc).length,S.LIMITS.streams);
   // Version 1 operations keep their old semantics (no identity), and mixed streams converge.
-  st=run([{...ADD(1),v:1,o:undefined,type:'word-add',word:{id:'wl',word:'gammel',meaning:'old'}},ADD(1)].map(p=>{const q={...p};if(q.v===1)delete q.o;return q}));
+  st=run([{...ADD(1),v:1,word:{id:'wl',word:'gammel',meaning:'old'}},ADD(1)].map(p=>{const q={...p};if(q.v===1)delete q.o;return q}));
   assert.equal(st.learning.items.length,2);
   // Stored state is validated: a malformed replay record never loads (the child becomes a local copy, nothing is deleted).
-  const good={v:1,cp:{st:{learning:L.empty(),meta:{profile:{name:'x',age:8,interests:'',readAloud:false,t:1,id:'A'.repeat(21)+'A'},helped:{},vc:{AAAAAAAAAAAA:{h:3,x:[7,9]}}}}},log:[],pending:[],seen:[],wm:0,out:{s:'AAAAAAAAAAAA',n:3}};
+  const good={v:1,cp:{st:{learning:L.empty(),meta:{profile:{name:'x',age:8,interests:'',readAloud:false,t:1,id:'A'.repeat(21)+'A'},helped:{},vc:{AAAAAAAAAAAA:{r:[[1,3],[7,7]]}}}}},log:[],pending:[],seen:[],wm:0,out:{s:'AAAAAAAAAAAA',n:3}};
   assert.ok(S.normalizeSync(good));
   const bad=f=>{const x=JSON.parse(JSON.stringify(good));f(x);return S.normalizeSync(x);};
-  assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.x=[9,7];}),null);assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.x=[4];}),null);
-  assert.equal(bad(x=>{x.cp.st.meta.vc.bad={h:0,x:[]};}),null);assert.equal(bad(x=>{x.cp.st.meta.vc=[];}),null);assert.equal(bad(x=>{x.out={s:'x',n:1};}),null);
+  assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.r=[[7,7],[1,3]];}),null,'unsorted');assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.r=[[1,3],[4,5]];}),null,'adjacent intervals must be merged');
+  assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.r=[[0,3]];}),null);assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA.r=[[3,1]];}),null);assert.equal(bad(x=>{x.cp.st.meta.vc.AAAAAAAAAAAA={h:3,x:[]};}),null);
+  assert.equal(bad(x=>{x.cp.st.meta.vc.bad={r:[]};}),null);assert.equal(bad(x=>{x.cp.st.meta.vc=[];}),null);assert.equal(bad(x=>{x.out={s:'x',n:1};}),null);
 });
 test('R6: an own stream never reuses a counter after local storage was restored from an older copy',async()=>{
   const {A,B,fam}=await pair('r6');
@@ -755,4 +763,91 @@ test('LOW: "Fjern fra denne telefonen" / "Hent fjernede barn tilbake hit" presse
   // The same for hide during a round.
   B.intercept=async(path,body,go)=>{if(path==='/sync/pull'){B.intercept=null;B.engine.hide(B.kid('Ada'));}return go();};
   await B.sync();assert.equal(B.engine.state().hidden.length,1);assert.equal(B.kid('Ada'),undefined);
+});
+
+/* ---------------- review follow-up: the replay record must never cost an honest operation ---------------- */
+const has=(d,word)=>d.kids.some(k=>k.learning.items.some(w=>w.word===word));
+test('R10: a relay that re-times ONE operation far into the future cannot make hundreds of later operations (and new words) disappear',async()=>{
+  const {clock,fam,A,B}=await pair('r10');
+  const ada=A.kid('Ada');
+  A.practice(ada,'sub1');                                                    // the operation the relay will re-time
+  A.intercept=async(path,body,go)=>{const r=await go();if(path!=='/sync/push'||r.status!==200)return r;A.intercept=null;
+    return {...r,data:{...r.data,results:r.data.results.map((x,i)=>i===r.data.results.length-1?{...x,at:x.at+60*DAY}:x)}};};
+  assert.deepEqual(await A.sync(),{ok:true});
+  const w=A.addWord(ada,'katt','cat');
+  for(const word of ['sol','hus','bil']){
+    for(let round=0;round<7;round++){
+      for(let i=0;i<45;i++){A.reviewWord(ada,w.id,{ok:i%3!==0});clock.advance(1000);}
+      A.saveKids();assert.deepEqual(await A.sync(),{ok:true});assert.deepEqual(await B.sync(),{ok:true});clock.advance(5*DAY);
+    }
+    A.addWord(ada,word,'x');assert.deepEqual(await A.sync(),{ok:true});assert.deepEqual(await B.sync(),{ok:true});
+  }
+  for(const word of ['katt','sol','hus','bil']){assert.ok(has(A,word),'A keeps '+word);assert.ok(has(B,word),'B keeps '+word);}
+  assert.ok(A.kid('Ada').learning.skills.sub1,'the re-timed operation itself still counts once');
+  assert.equal(A.kid('Ada').learning.skills.sub1.ev.length,1);assert.equal(B.kid('Ada').learning.skills.sub1.ev.length,1);
+});
+test('R11: an honest clock correction (a phone whose clock was 3 days fast) does not make later operations disappear',async()=>{
+  const {clock,fam,A,B}=await pair('r11');
+  const ada=A.kid('Ada');A.online=false;
+  A.skew=3*DAY;A.practice(ada,'sub1');                                       // recorded with a clock 3 days fast
+  A.skew=0;clock.advance(2*3600000);
+  const w=A.addWord(ada,'katt','cat');for(let i=0;i<300;i++){A.reviewWord(ada,w.id,{ok:i%2===0});clock.advance(1000);}
+  A.saveKids();A.online=true;
+  clock.advance(DAY);assert.deepEqual(await A.sync(),{ok:true});assert.deepEqual(await B.sync(),{ok:true});
+  for(let round=0;round<6;round++){clock.advance(5*DAY);A.reviewWord(ada,w.id,{ok:true});assert.deepEqual(await A.sync(),{ok:true});assert.deepEqual(await B.sync(),{ok:true});}
+  A.addWord(ada,'hus','house');assert.deepEqual(await A.sync(),{ok:true});assert.deepEqual(await B.sync(),{ok:true});
+  for(const d of [A,B]){assert.ok(has(d,'katt'));assert.ok(has(d,'hus'),'the new word is not dropped');}
+  assert.equal(A.kid('Ada').learning.skills.sub1.ev.length,1);
+});
+test('R12: many hide/unhide cycles keep one authoring stream (no stream budget is used up)',async()=>{
+  const {fam,A,B}=await pair('r12');
+  const stream=()=>JSON.stringify(Object.keys(B.kid('Ada')?.sync.cp.st?.meta.vc??{}));
+  B.addWord(B.kid('Ada'),'start','x');await B.sync();await A.sync();
+  const first=B.kid('Ada').sync.out.s;
+  for(let i=0;i<70;i++){
+    assert.deepEqual(B.engine.hide(B.kid('Ada')),{ok:true});B.engine.unhide();await B.sync();
+    B.practice(B.kid('Ada'),'sub1',{sid:'c'+i});assert.deepEqual(await B.sync(),{ok:true});
+    assert.equal(B.kid('Ada').sync.out.s,first,'cycle '+i+' continues the same stream');
+  }
+  await A.sync();
+  for(const d of [A,B]){assert.ok(d.kid('Ada').learning.skills.sub1.ev.some(e=>e.sid==='c69'),'the last operation survives');}
+  assert.equal(snapshot(A),snapshot(B));
+  assert.ok(Object.keys(B.kid('Ada').sync.cp.st?.meta.vc??{}).length<=2);void stream;
+});
+test('R13: a cloned or restored copy of a phone\'s storage does not lose work, in either order of syncing',async()=>{
+  for(const first of ['clone','original']){
+    const {clock,fam,A,B,key}=await pair('r13'+first);
+    B.addWord(B.kid('Ada'),'start','x');await B.sync();await A.sync();
+    const C=await device(fam,clock);                                          // a restored copy of B's storage on another phone
+    C.persisted=B.persisted;C.state=B.state;C.reload();C.restart();assert.ok((await C.engine.join({key})).ok);
+    assert.equal(C.kid('Ada').sync.out.s,B.kid('Ada').sync.out.s,'same stream, same counters');
+    B.addWord(B.kid('Ada'),'fraB','x');B.practice(B.kid('Ada'),'sub1');
+    C.addWord(C.kid('Ada'),'fraC','y');C.practice(C.kid('Ada'),'add1');
+    const order=first==='clone'?[C,B,C,A,B]:[B,C,B,A,C];
+    for(const d of [...order,B,C,A,B,C,A])assert.deepEqual(await d.sync(),{ok:true});   // (a re-sent operation needs one more round)
+    for(const [nm,d] of [['A',A],['B',B],['C',C]]){assert.ok(has(d,'fraB'),first+': fraB on '+nm);assert.ok(has(d,'fraC'),first+': fraC');assert.ok(d.kid('Ada').learning.skills.sub1&&d.kid('Ada').learning.skills.add1);}
+    assert.equal(snapshot(A),snapshot(B));assert.equal(snapshot(A),snapshot(C));
+  }
+});
+test('R14: storage rolled back to an older copy, then a restart: the first download comes before any upload, so no counter is reused',async()=>{
+  const {A,B}=await pair('r14');
+  const ada=B.kid('Ada'),w=B.addWord(ada,'katt','cat');await B.sync();
+  const old=B.persisted,oldState=B.state;
+  B.reviewWord(ada,w.id,{ok:true});B.reviewWord(ada,w.id,{ok:false});await B.sync();
+  B.persisted=old;B.state=oldState;B.reload();B.restart();                    // rolled back, app restarted
+  B.addWord(B.kid('Ada'),'etter','after');                                    // work done before the first sync
+  assert.deepEqual(await B.sync(),{ok:true});await A.sync();await B.sync();
+  for(const d of [A,B])assert.ok(has(d,'etter'),'the work after the rollback is kept');
+  assert.equal(snapshot(A),snapshot(B));
+});
+test('R15: an unhide pressed while a page is being applied is not overwritten by that round',async()=>{
+  const {A,B}=await pair('r15');
+  B.engine.hide(B.kid('Ada'));A.addWord(A.kid('Ada'),'ny','new');await A.sync();
+  // The reset arrives after the page was fetched, while the round is working through it.
+  let fired=false;const open=B.engine;
+  B.intercept=async(path,body,go)=>{const r=await go();if(path==='/sync/pull'&&!fired&&r.data.records.length){fired=true;B.engine.unhide();}return r;};
+  await B.sync();B.intercept=null;
+  assert.equal(B.engine.state().hidden.length,0,'the unhide survived the running round');
+  assert.ok(B.kid('Ada'),'and the round itself went on to download the child again');void open;
+  await B.sync();await A.sync();assert.equal(snapshot(A),snapshot(B));
 });

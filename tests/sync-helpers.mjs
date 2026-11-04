@@ -63,17 +63,23 @@ export async function device(fam,clock,{skew=0,seed=seedCounter++,random,realm:r
     return dev.intercept?dev.intercept(path,body,call):call();
   }
   const saveKids=()=>{if(!dev.storageOk)return false;dev.persisted=JSON.stringify(dev.kids);return true;};
-  dev.engine=S.createEngine({
-    subtle:webcrypto.subtle,random:random||prng(seed),now,request:req,
-    loadState:()=>dev.state,saveState:t=>{if(!dev.storageOk)return false;dev.state=t;return true;},
-    kids:()=>dev.kids,saveKids,
-    addKid:k=>{if(dev.kids.length===1&&S.blank(dev.kids[0]))dev.kids[0]=k;else dev.kids.push(k);},
-    removeKid:k=>{const i=dev.kids.indexOf(k);if(i>=0)dev.kids.splice(i,1);if(!dev.kids.length)dev.kids.push(blankKid());},
-    newKid:()=>blankKid()
-  });
-  // Results come from the client realm; plain copies compare structurally in this realm.
-  const plain=v=>v&&typeof v==='object'?JSON.parse(JSON.stringify(v)):v,inner=dev.engine;
-  dev.engine=Object.fromEntries(Object.entries(inner).map(([k,fn])=>[k,(...a)=>{const r=fn(...a);return r&&typeof r.then==='function'?r.then(plain):plain(r);}]));
+  const rnd=random||prng(seed);
+  const build=()=>{
+    const inner=S.createEngine({
+      subtle:webcrypto.subtle,random:rnd,now,request:req,
+      loadState:()=>dev.state,saveState:t=>{if(!dev.storageOk)return false;dev.state=t;return true;},
+      kids:()=>dev.kids,saveKids,
+      addKid:k=>{if(dev.kids.length===1&&S.blank(dev.kids[0]))dev.kids[0]=k;else dev.kids.push(k);},
+      removeKid:k=>{const i=dev.kids.indexOf(k);if(i>=0)dev.kids.splice(i,1);if(!dev.kids.length)dev.kids.push(blankKid());},
+      newKid:()=>blankKid()
+    });
+    // Results come from the client realm; plain copies compare structurally in this realm.
+    const plain=v=>v&&typeof v==='object'?JSON.parse(JSON.stringify(v)):v;
+    return Object.fromEntries(Object.entries(inner).map(([k,fn])=>[k,(...a)=>{const r=fn(...a);return r&&typeof r.then==='function'?r.then(plain):plain(r);}]));
+  };
+  dev.engine=build();
+  // A new page load: a fresh engine over the same persisted storage (in-memory flags such as "already downloaded" are gone).
+  dev.restart=()=>{dev.engine=build();};
   dev.now=now;dev.saveKids=saveKids;dev.token=()=>token;
   dev.repair=async()=>{token=await dev.fam.b.api.makeToken(dev.fam.env,webcrypto.randomUUID());};
   // Reload as the page does: parse persisted kids, normalize learning, check sync data.
