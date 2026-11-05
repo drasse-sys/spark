@@ -904,3 +904,54 @@ test('R16: two clones that both stay in use lose at most the first concurrent op
   assert.notEqual(B.kid('Ada').sync.out.s,C.kid('Ada').sync.out.s,'the clones no longer share a stream');
   assert.equal(snapshot(A),snapshot(B));assert.equal(snapshot(A),snapshot(C));
 });
+
+/* ---------------- final confirmation: a stored operation never changes identity ---------------- */
+test('R17: a relay that stores an operation, hides the acknowledgement and the record, and serves an old own-stream record, cannot make the operation change identity or count twice',async()=>{
+  const small=clientRealm(cut('seen:10000','seen:40'));
+  const clock=world(),fam=family(db,clock,'r17'+(n++));
+  const A=await device(fam,clock,{realm:small}),B=await device(fam,clock,{realm:small});
+  const ada=A.kids[0];ada.name='Ada';ada.age=9;A.practice(ada,'add1');
+  const c=await A.engine.create({code:fam.code});A.engine.shareAll();A.saveKids();await A.sync();
+  assert.ok((await B.engine.join({key:c.key})).ok);await B.sync();
+  const w=B.addWord(B.kid('Ada'),'katt','cat');await B.sync();
+  for(let i=0;i<60;i++){B.reviewWord(B.kid('Ada'),w.id,{ok:true});clock.advance(1000);if(i%10===9){await B.sync();clock.advance(4*DAY);}}
+  clock.advance(16*DAY);await B.sync();await A.sync();
+  const stream=B.kid('Ada').sync.out.s,mine=(await storedOps(fam,B,'word-review')).filter(x=>x.p.o.s===stream);
+  const R=mine[1].row;assert.ok(!B.kid('Ada').sync.seen.includes(R.id.slice(0,16)),'R: an own old record, forgotten by the id window');
+  // X: one new review. The Worker stores it; the relay says "retry", then hides X and serves R again in the same round's download.
+  const Xt=B.now();B.reviewWord(B.kid('Ada'),w.id,{ok:true});
+  const X=B.kid('Ada').sync.pending.at(-1),Xo=JSON.stringify(X.p.o);
+  B.intercept=async(path,body,go)=>{
+    const r=await go();
+    if(path==='/sync/push'){
+      B.intercept=async(p2,b2,go2)=>{const r2=await go2();if(p2!=='/sync/pull'||r2.status!==200||r2.data.more)return r2;
+        const data=JSON.parse(JSON.stringify(r2.data));data.records=data.records.filter(x=>x.id!==X.id);
+        const seq=Math.max(data.next,data.head,Number(b2.cursor))+1;data.records.push({seq,id:R.id,child:R.child,kind:R.kind,at:data.serverNow,ck:1,iv:R.iv,ct:R.ct});
+        data.next=seq;data.head=seq;B.intercept=null;return {...r2,data};};
+      return {...r,data:{...r.data,results:r.data.results.map(x=>({id:x.id,status:'retry'}))}};
+    }
+    return r;
+  };
+  await B.sync();
+  const sync=B.kid('Ada').sync,xAfter=sync.pending.find(o=>o.id===X.id);
+  assert.ok(sync.clash===undefined||sync.out.s!==stream,'the clash was handled');
+  assert.equal(JSON.stringify(xAfter.p.o),Xo,'X was already sent: it keeps its authenticated identity');
+  assert.equal(xAfter.sent,true);
+  await resumeAtHead(fam,B);
+  // Later: X is acknowledged as a duplicate, other work follows, and the relay serves both versions it could possibly have.
+  await B.sync();await A.sync();
+  for(let i=0;i<60;i++){A.practice(A.kid('Ada'),'sub1',{sid:'z'+i});clock.advance(1000);if(i%10===9){await A.sync();clock.advance(DAY);}}
+  clock.advance(20*DAY);await A.sync();await B.sync();await A.sync();
+  const times=d=>d.kid('Ada').learning.items[0].ev.filter(e=>e.t===Xt).length;
+  assert.equal(times(A),1,'A counts X once');assert.equal(times(B),1,'B counts X once');
+  assert.equal(snapshot(A),snapshot(B));
+});
+test('R17b: an operation is marked as sent, and that survives a restart, before the request leaves; a failed save sends nothing',async()=>{
+  const {A,B}=await pair('r17b');
+  B.addWord(B.kid('Ada'),'katt','cat');
+  B.storageOk=false;assert.equal((await B.sync()).code,'storage');assert.equal(B.sent.filter(x=>x.path==='/sync/push').length,0,'nothing was sent when the flag could not be saved');
+  B.storageOk=true;B.intercept=async(path,body,go)=>{const r=await go();if(path==='/sync/push'){B.intercept=null;throw Error('reply lost');}return r;};
+  await B.sync();B.reload();B.restart();
+  assert.ok(B.kid('Ada').sync.pending.every(o=>o.sent===true),'the flag survived the restart');
+  assert.deepEqual(await B.sync(),{ok:true});await A.sync();assert.equal(snapshot(A),snapshot(B));
+});

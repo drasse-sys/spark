@@ -228,7 +228,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
       const p=checkPayload(r.kind,r.p,'');if(!p)return null;log.push({seq:r.seq,id:r.id,kind:r.kind,at:r.at,ck:r.ck,p});
     }
     const pending=[];
-    for(const op of s.pending){if(!op||!ID.test(op.id)||!['base','op'].includes(op.kind))return null;const p=checkPayload(op.kind,op.p,'');if(!p)return null;pending.push({id:op.id,kind:op.kind,p});}
+    for(const op of s.pending){if(!op||!ID.test(op.id)||!['base','op'].includes(op.kind))return null;const p=checkPayload(op.kind,op.p,'');if(!p)return null;pending.push({id:op.id,kind:op.kind,p,...(op.sent===true?{sent:true}:{})});}
     return {v:1,cp:{st},log,pending,seen:s.seen.filter(x=>typeof x==='string'&&x.length===16).slice(-LIMITS.seen),wm:Number.isSafeInteger(s.wm)&&s.wm>0?s.wm:0,...(s.out?{out:{s:s.out.s,n:s.out.n}}:{}),...(s.clash===true?{clash:true}:{}),...(profile(s.profile)?{profile:profile(s.profile)}:{}),...(s.blocked===true?{blocked:true}:{})};
   }
   // Local profile and learning as the child's synced state. Fields that never sync stay as they were on this phone.
@@ -423,6 +423,10 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
             batch.push(rec);bytes+=rec.ct.length;
           }
           if(oversize&&!batch.length){fork(kid);if(!d.saveKids())return fail('storage');break;}
+          // From this moment an operation may be stored on the Worker whatever the reply says (a lost reply, a withheld record):
+          // it is marked, and saved, BEFORE the request, and from then on it keeps its authenticated identity for good.
+          for(const rec of batch){const o=kid.sync.pending.find(x=>x.id===rec.id);if(o)o.sent=true;}
+          if(!d.saveKids())return fail('storage');
           const r=await d.request('/sync/push',{v:1,gen:s.gen,clientNow:d.now(),records:batch});
           if(r.status!==200||!Array.isArray(r.data?.results)||r.data.results.length!==batch.length)return stop(r);
           if(r.data.results.some((res,i)=>res?.id!==batch[i].id))return fail('unavailable');
@@ -518,7 +522,7 @@ function emptySync(){return {v:1,cp:{st:null},log:[],pending:[],seen:[],wm:0};}
           // Operations still queued after a complete download were never stored, so they can safely change stream.
           for(const kid of shared())if(kid.sync.clash){
             delete kid.sync.clash;
-            if(kid.sync.out){const old=kid.sync.out.s,fresh={s:b64url(d.random(9)),n:0};for(const op of kid.sync.pending)if(op.p.o&&op.p.o.s===old){fresh.n++;op.p={...op.p,o:{s:fresh.s,n:fresh.n}};}kid.sync.out=fresh;}
+            if(kid.sync.out){const old=kid.sync.out.s,fresh={s:b64url(d.random(9)),n:0};for(const op of kid.sync.pending)if(!op.sent&&op.p.o&&op.p.o.s===old){fresh.n++;op.p={...op.p,o:{s:fresh.s,n:fresh.n}};}kid.sync.out=fresh;}
           }
           const horizon=data.serverNow-WINDOW-SKEW;
           for(const kid of shared()){try{checkpoint(kid.sync,horizon);}catch{detach(kid);}}
