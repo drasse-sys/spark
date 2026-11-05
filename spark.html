@@ -148,12 +148,20 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
 <script src="learning.js"></script>
 <script src="visuals.js"></script>
 <script src="learning-ui.js"></script>
+<script src="sync.js"></script>
+<script src="sync-ui.js"></script>
 <script>
 /* ================= SPARK v5.3 =================
    Privat Worker beskytter leverandørnøkler.
    Profiler, økter og enhetstoken lagres lokalt på denne telefonen.
 ============================================== */
 
+// SYNC1: if sync.js or sync-ui.js did not load, these no-op fallbacks keep the app working exactly as before.
+// Shared children are kept as local copies (their unsent changes cannot be queued without sync), and the download
+// cursor restarts, so the family copies come back once the scripts load again. Nothing is lost.
+for(const [name,fn] of Object.entries({syncInitKids:()=>{let n=0;for(const k of kids)if(k.sync){delete k.sync;delete k.id;k.fork=true;n++;}if(n){try{const s=JSON.parse(localStorage.getItem('spark_sync')||'null');if(s){s.cursor=0;localStorage.setItem('spark_sync',JSON.stringify(s));}}catch{}}},syncRecord:()=>{},syncProfile:()=>{},syncSoon:()=>{},syncHTML:()=>'',bindSync:()=>{},syncResetChildLearning:()=>{},
+  syncNoteHTML:()=>'<div class="note info"><strong>📱 Flere telefoner:</strong> den samme Spark-serveren kan brukes av Olav, lillebror og en tredje telefon. Hver telefon pares én gang. Profiler og økthistorikk er foreløpig lokale på hver telefon og synkroniseres ikke mellom enheter.</div>'}))
+  if(typeof window[name]!=='function')window[name]=fn;
 const LS = { kids:'spark_kids', active:'spark_active', voice:'spark_voice',
              voiceName:'spark_voice_name', sess:'spark_session',
              server:'spark_server_url', device:'spark_device_token', tokenServer:'spark_device_server' };
@@ -212,6 +220,7 @@ kids=kids.map(value=>{
   };
 });
 if(!kids.length) kids=[blankKid('')];
+syncInitKids();
 kids.forEach(k=>L.prune(k,Date.now()));
 if(migrationReady)store.setItem(LS.kids,JSON.stringify(kids));
 try{const backup=JSON.parse(store.getItem('spark_learning_backup')||'null');if(backup&&Date.now()-backup.createdAt>=30*L.DAY)store.removeItem('spark_learning_backup');}catch{}
@@ -424,7 +433,8 @@ function loadSession(i=active){
     const savedAt=[s.ts,s.migratedAt].find(t=>Number.isSafeInteger(t)&&t>0);
     if(savedAt&&Date.now()-savedAt>=30*L.DAY){
       if(s.learning?.id&&Array.isArray(s.learning.events)&&!kids[i].learning.sessions.some(a=>a.id===s.learning.id)){
-        kids[i].learning.sessions.push(L.aggregate(s.learning,s.mode,savedAt));
+        const aggregate=L.aggregate(s.learning,s.mode,savedAt);
+        kids[i].learning.sessions.push(aggregate);syncRecord(kids[i],{type:'session',t:Date.now(),session:aggregate});
         if(!saveKids())return null;
       }
       store.removeItem(sessionKey(i));return null;
@@ -452,10 +462,11 @@ function archiveSession(summary=''){
   const k = kid();
   const previous=k.sessions;
   const previousLearning=(k.learning ||= L.empty()).sessions.slice();
+  const previousQueue=k.sync?k.sync.pending.slice():null;
   const ls=ensureLearning();
   const endedAt=Date.now();
-  if(ls.reflection&&ls.task?.skill&&k.learning.skills[ls.task.skill]&&ls.task.s<=1&&ls.task.completed)k.learning.skills[ls.task.skill].helped=ls.reflection;
-  if(!k.learning.sessions.some(s=>s.id===ls.id))k.learning.sessions.push(L.aggregate(ls,taskMode,endedAt));
+  if(ls.reflection&&ls.task?.skill&&k.learning.skills[ls.task.skill]&&ls.task.s<=1&&ls.task.completed){k.learning.skills[ls.task.skill].helped=ls.reflection;syncRecord(k,{type:'helped',t:endedAt,skill:ls.task.skill,value:ls.reflection});}
+  if(!k.learning.sessions.some(s=>s.id===ls.id)){const aggregate=L.aggregate(ls,taskMode,endedAt);k.learning.sessions.push(aggregate);syncRecord(k,{type:'session',t:endedAt,session:aggregate});}
   if(!k.sessions) k.sessions = [];
   k.sessions=k.sessions.slice();
   k.sessions.push({
@@ -469,9 +480,10 @@ function archiveSession(summary=''){
   });
   // Retain structured aggregates independently of transcript retention.
   L.prune(k,Date.now());
-  if(!saveKids()){ k.sessions=previous; k.learning.sessions=previousLearning; return false; }
+  if(!saveKids()){ k.sessions=previous; k.learning.sessions=previousLearning; if(previousQueue)k.sync.pending=previousQueue; return false; }
   if(store.removeItem(sessionKey())) storageWarning='';
   showStatus();
+  syncSoon();
   return true;
 }
 
@@ -486,7 +498,7 @@ function isMinuteQuota(err){
 }
 async function fetchServer(path, options, base){
   const controller=new AbortController();
-  const timer=setTimeout(()=>controller.abort(),path==='/pair'||path.startsWith('/backup/')?20000:150000);
+  const timer=setTimeout(()=>controller.abort(),path==='/pair'||path.startsWith('/backup/')||path.startsWith('/sync/')?20000:150000);
   try{return await fetch(base?base+path:endpoint(path),{...options,signal:controller.signal});}
   catch(err){
     if(controller.signal.aborted) throw new Error('Spark-serveren brukte for lang tid. Vent litt og prøv igjen.');
@@ -739,15 +751,15 @@ function renderSetup(){
       <button class="btn ghost sm" id="clrLog" style="margin-top:7px">🧹 Tøm logg</button>
     </div>` : `<div class="note info"><strong>📋 Undervisningslogg:</strong> etter ferdige økter lagres en kort oppsummering lokalt på denne enheten.</div>`}
 
-    <div class="note info">
-      <strong>📱 Flere telefoner:</strong> den samme Spark-serveren kan brukes av Olav, lillebror og en tredje telefon. Hver telefon pares én gang. Profiler og økthistorikk er foreløpig lokale på hver telefon og synkroniseres ikke mellom enheter.
-    </div>
+    ${syncNoteHTML()}
 
 ${parentHTML()}
+${syncHTML()}
     <button class="btn" id="saveBtn">💾 Lagre</button>
   </div>`;
 
   bindParent();
+  bindSync();
   document.querySelectorAll('#kidRow .kid[data-i]').forEach(t=>t.onclick=()=>{
     if(busy || !saveForm()) return; chooseChild(parseInt(t.dataset.i,10)); render();
   });
@@ -788,6 +800,7 @@ function saveForm(){
   if($('fFun')) kid().interests=$('fFun').value.trim().slice(0,120);
   if(!validServer(serverUrl)){serverUrl=oldServer;alert('Bruk en gyldig HTTPS-serveradresse uten sti.');return false;}
   const saved=store.setItem(LS.server,serverUrl);
+  syncProfile(kid());
   return saveKids() && saved;
 }
 
@@ -1140,6 +1153,10 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
 window.addEventListener('pagehide',()=>{if(view==='chat'&&!readOnly) saveSession();});
 document.addEventListener('visibilitychange',()=>{if(document.hidden && view==='chat'&&!readOnly){if(learningSession)learningSession.lastInteraction=null;stopMic();stopSpeak();saveSession();}});
 render();
+// SYNC1 (off unless a parent turned it on): background rounds on start, on reconnect and every five minutes.
+window.addEventListener('online',()=>syncSoon());
+setInterval(()=>syncSoon(),300000);
+syncSoon(1500);
 </script>
 </body>
 </html>

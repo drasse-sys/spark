@@ -37,9 +37,10 @@ function initHomeworkLearning(text){
 }
 function learningContext(){return L.context(ensureLearning(),kid().learning);}
 function recordLearning(ok,verified,kind='task',error='',confidence=''){
-  const s=ensureLearning(),t=s.task;
-  const e=L.event(kid().learning,t.skill,{id:s.id+':'+t.id+':'+t.attempts,t:Date.now(),sid:s.id,s:t.s,ok,verified,k:kind,e:error,c:confidence});
-  if(e){s.events.push({...e,skill:t.skill});L.boundSession(s);saveKids();}
+  const s=ensureLearning(),t=s.task,input={id:s.id+':'+t.id+':'+t.attempts,t:Date.now(),sid:s.id,s:t.s,ok,verified,k:kind,e:error,c:confidence};
+  const e=L.event(kid().learning,t.skill,input);
+  // SYNC1: a shared child also queues the observed input (not the derived state) for the family log.
+  if(e){s.events.push({...e,skill:t.skill});L.boundSession(s);if(kid().sync&&globalThis.SparkSync)syncRecord(kid(),SparkSync.skillOp(t.skill,input,e));saveKids();}
   return e;
 }
 function offerTransfer(){
@@ -135,12 +136,9 @@ function advancePractice(){
 }
 function wordItem(item){return {skill:'readWord',word:true,itemId:item.id,prompt:item.meaning?'Hvilket ord fra ordlisten betyr «'+item.meaning+'»?':'Skriv ordet du hører.',answer:item.word,sentence:item.sentence};}
 function recordWord(item,ok,s,c){
-  const w=kid().learning.items.find(w=>w.id===item.itemId);if(!w)return;
-  const now=Date.now(),delayed=w.lastAt&&now-w.lastAt>=L.DAY;
-  if(ok&&s<=1&&c!=='gjetter'&&delayed)w.box=Math.min(5,(w.box||1)+1);else if(!ok||s>=3)w.box=Math.max(1,(w.box||1)-1);
-  w.box ||=1;w.lastAt=now;w.due=now+L.SPACING[w.box-1]*L.DAY;
-  w.ev ||= [];w.ev.push({t:now,s,ok,delayed:!!delayed});w.ev=w.ev.slice(-8);
-  ensureLearning().events.push({skill:'readWord',t:now,s,ok,verified:true,k:'word',delayed:!!delayed,item:true});L.boundSession(learningSession);saveKids();
+  const now=Date.now(),r=L.reviewWord(kid().learning,{wordId:item.itemId,t:now,s,ok,c});if(!r)return;
+  syncRecord(kid(),{type:'word-review',t:now,wordId:item.itemId,s,ok,c:['sikker','usikker','gjetter'].includes(c)?c:'',d:r.delayed});
+  ensureLearning().events.push({skill:'readWord',t:now,s,ok,verified:true,k:'word',delayed:r.delayed,item:true});L.boundSession(learningSession);saveKids();
 }
 function helpStep(n){
   if(busy||readOnly||pendingFinal)return;
@@ -205,7 +203,9 @@ function saveWord(w){
   const items=kid().learning.items;
   if(items.some(i=>i.word===w.word&&i.meaning===w.meaning))return;
   if(items.length>=60){alert('Ordlisten er full. Fjern gamle ord i foreldreoversikten først.');return;}
-  items.push({...w,id:newSessionId(),box:1,due:Date.now()+L.DAY,ev:[]});
+  const item=L.addWord(kid().learning,{...w,id:newSessionId(),t:Date.now()});
+  // The example sentence is homework text: it stays on this phone and is never synced.
+  if(item)syncRecord(kid(),{type:'word-add',t:Date.now(),word:{id:item.id,word:item.word,meaning:item.meaning}});
 }
 function parentEventLabel(e){
   if(!e.verified)return 'tutorobservasjon · støtte S'+e.s;
@@ -228,10 +228,15 @@ function parentHTML(){
     <p>Mikrofon er valgfri. Nettleseren kan sende tale til sin skytjeneste. Spark lagrer ikke lyd. Gjenkjent tekst må sjekkes før sending. Inntil 8 samtaler beholdes i maksimalt 30 dager. Inntil 120 lette øktoppsummeringer og kompakt ferdighetsevidens beholdes lokalt.</p>
     <button class="qb" id="clearWords">Tøm ordlisten</button><button class="qb" id="exportLearning">Last ned læringskopi</button><label for="importLearning">Gjenopprett læringskopi som nye profiler</label><input id="importLearning" type="file" accept="application/json"><button class="qb" id="recoverLearning">Gjenopprett sikkerhetskopi før migrering</button><button class="qb" id="deleteLearning">Slett all historikk for dette barnet</button></section>`;
 }
-function learningExport(){kids.forEach(k=>L.prune(k,Date.now()));return {schema:'spark-learning-export-v3',createdAt:Date.now(),kids:kids.map(k=>({name:k.name,age:k.age,interests:k.interests,notes:k.notes,log:k.log,sessions:k.sessions,learning:k.learning,readAloud:!!k.readAloud}))};}
+function learningExport(){kids.forEach(k=>L.prune(k,Date.now()));return {schema:'spark-learning-export-v3',createdAt:Date.now(),kids:kids.map(k=>({name:k.name,age:k.age,interests:k.interests,notes:k.notes,log:k.log,sessions:k.sessions,learning:k.learning,readAloud:!!k.readAloud,...(k.fork===true&&!k.sync?{origin:BACKUP_ORIGIN_LOCAL_COPY}:{})}))};}
+// SYNC1: a profile that is only a local copy of a (possibly since deleted) family child carries `origin:'local-copy'` through a
+// backup. It is a provenance label and nothing else: it holds no id, key, cursor or queue, grants no authority and cannot add
+// evidence. Restoring it only keeps the copy out of bulk sharing and behind the explicit deletion warning. A normal profile
+// carries no origin, and an unknown value is ignored (it can only ever make a profile more careful, never less).
+const BACKUP_ORIGIN_LOCAL_COPY='local-copy';
 function bindParent(){
-  $('readAloudAllowed').onchange=e=>{kid().readAloud=e.target.checked;saveKids();};
-  $('clearWords').onclick=()=>{if(confirm('Tømme ordlisten for dette barnet?')){kid().learning.items=[];saveKids();render();}};
+  $('readAloudAllowed').onchange=e=>{kid().readAloud=e.target.checked;syncProfile(kid());saveKids();};
+  $('clearWords').onclick=()=>{if(confirm('Tømme ordlisten for dette barnet?')){const ids=kid().learning.items.map(w=>w.id);kid().learning.items=[];if(ids.length)syncRecord(kid(),{type:'word-remove',t:Date.now(),ids});saveKids();render();}};
   $('exportLearning').onclick=async e=>{
     const button=e.currentTarget;button.disabled=true;
     try{
@@ -248,7 +253,7 @@ function bindParent(){
     if(!confirm('Gjenopprette tidligere data som nye profiler? Nåværende barn beholdes.'))return;
     try{const backup=JSON.parse(raw),old=JSON.parse(backup.kids||'[]');if(!Array.isArray(old))throw Error('Ugyldig eldre data');const imported=old.map(k=>({...blankKid(''),name:typeof k?.name==='string'?k.name:'Gjenopprettet',age:Number.isInteger(k?.age)?k.age:8,notes:Array.isArray(k?.notes)?k.notes.filter(n=>typeof n==='string'):[],log:Array.isArray(k?.log)?k.log.filter(e=>e&&['d','m','t'].every(x=>typeof e[x]==='string')).slice(-20):[],sessions:Array.isArray(k?.sessions)?k.sessions.filter(s=>validChat(s?.msgs)).map(s=>({...s,migratedAt:Number.isSafeInteger(s.migratedAt)?s.migratedAt:Date.now()})):[],learning:L.empty()}));imported.forEach(k=>L.prune(k,Date.now()));const offset=kids.length;kids.push(...imported);if(!saveKids()){kids.length=offset;return;}for(const [i,session] of backup.sessions||[]){if(i>=imported.length)continue;try{const s=JSON.parse(session);s.kid=offset+i;if(!Number.isSafeInteger(s.migratedAt)&&!Number.isSafeInteger(s.ts))s.migratedAt=Date.now();store.setItem(sessionKey(offset+i),JSON.stringify(s));}catch{}}render();}catch{alert('Kopien kunne ikke gjenopprettes automatisk. Den er bevart lokalt.');}
   };
-  $('deleteLearning').onclick=()=>{if(!confirm('Slette økter, notater, ord og læringshistorikk for dette barnet?'))return;const k=kid();k.notes=[];k.log=[];k.sessions=[];k.learning=L.empty();store.removeItem(sessionKey());const raw=store.getItem('spark_learning_backup');if(raw){try{const b=JSON.parse(raw),old=JSON.parse(b.kids||'[]');if(Array.isArray(old)){old[active]=null;b.kids=JSON.stringify(old);}b.sessions=(b.sessions||[]).filter(([i])=>i!==active);b.legacy=null;store.setItem('spark_learning_backup',JSON.stringify(b));}catch{store.removeItem('spark_learning_backup');}}resetLearning();chatMsgs=[];history=[];transcript='';saveKids();render();};
+  $('deleteLearning').onclick=()=>{if(kid().sync){syncResetChildLearning();return;}if(!confirm('Slette økter, notater, ord og læringshistorikk for dette barnet?'))return;const k=kid();k.notes=[];k.log=[];k.sessions=[];k.learning=L.empty();store.removeItem(sessionKey());const raw=store.getItem('spark_learning_backup');if(raw){try{const b=JSON.parse(raw),old=JSON.parse(b.kids||'[]');if(Array.isArray(old)){old[active]=null;b.kids=JSON.stringify(old);}b.sessions=(b.sessions||[]).filter(([i])=>i!==active);b.legacy=null;store.setItem('spark_learning_backup',JSON.stringify(b));}catch{store.removeItem('spark_learning_backup');}}resetLearning();chatMsgs=[];history=[];transcript='';saveKids();render();};
 }
 /* ---- TR1 trusted backup ----
    The Worker signs only a SHA-256 digest of the exact export bytes; the backup itself never leaves the phone.
@@ -321,6 +326,7 @@ function validateImport(data,now=Date.now(),trusted=null){
   return data.kids.map(k=>{
     if(!k||typeof k.name!=='string'||!Number.isInteger(k.age)||k.age<4||k.age>16||k.learning?.version!==3||!Array.isArray(k.learning.items)||!Array.isArray(k.learning.sessions)||!k.learning.skills)throw Error('Ugyldig profil.');
     const clean={...blankKid(k.name.slice(0,40)),age:k.age,interests:String(k.interests||'').slice(0,120),notes:Array.isArray(k.notes)?k.notes.filter(n=>typeof n==='string').slice(-12):[],log:[],sessions:[],learning:L.empty(),readAloud:k.readAloud===true};
+    if(k.origin===BACKUP_ORIGIN_LOCAL_COPY)clean.fork=true;
     for(const [id,r] of Object.entries(k.learning.skills)){
       if(!Object.hasOwn(L.CATALOG,id)||!Array.isArray(r.ev))throw Error('Ukjent ferdighet.');
       for(const e of r.ev)if(!L.event(clean.learning,id,e))throw Error('Ugyldig læringshendelse.');

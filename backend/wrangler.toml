@@ -54,3 +54,65 @@ namespace_id = "1004"
   [ratelimits.simple]
   limit = 20
   period = 60
+
+# ---------------------------------------------------------------------------------------------------------------------
+# SYNC1 multi-device sync candidate: an ISOLATED, NOT DEPLOYED environment. Plain `wrangler deploy` (production) does not
+# read this section: production has no SYNC_DB binding and no SYNC_ENABLED, so every /sync/* path answers 404 there.
+# `wrangler deploy --env sync-lab` would create a separate Worker named "spark-family-api-sync-lab". It needs its own
+# D1 database (`wrangler d1 create spark-sync-lab`, then paste the id below) and its own secrets. Nothing has been
+# created. Tests run this configuration only locally (workerd/Miniflare local D1). See
+# docs/2026-11-04-SPARK-SYNC1-Privacy-First-Multi-Device-Sync.md.
+[env.sync-lab]
+workers_dev = true
+
+[env.sync-lab.secrets]
+required = [ "GEMINI_API_KEY", "FAMILY_CODE", "DEVICE_SIGNING_SECRET" ]
+
+[env.sync-lab.vars]
+ALLOWED_ORIGINS = "https://drasse-sys.github.io"
+BACKUP_PROVIDER = "none"
+OPENROUTER_MODEL = "openrouter/free"
+GROQ_MODEL = "openai/gpt-oss-120b"
+SYNC_ENABLED = "1"
+
+[[env.sync-lab.d1_databases]]
+binding = "SYNC_DB"
+database_name = "spark-sync-lab"
+database_id = "00000000-0000-0000-0000-000000000000" # placeholder: local development and tests only
+migrations_dir = "migrations"
+
+[[env.sync-lab.ratelimits]]
+name = "CHAT_LIMITER"
+namespace_id = "2001"
+  [env.sync-lab.ratelimits.simple]
+  limit = 30
+  period = 60
+
+[[env.sync-lab.ratelimits]]
+name = "PAIR_LIMITER"
+namespace_id = "2002"
+  [env.sync-lab.ratelimits.simple]
+  limit = 6
+  period = 60
+
+[[env.sync-lab.ratelimits]]
+name = "CHAT_GLOBAL_LIMITER"
+namespace_id = "2003"
+  [env.sync-lab.ratelimits.simple]
+  limit = 40
+  period = 60
+
+[[env.sync-lab.ratelimits]]
+name = "PAIR_GLOBAL_LIMITER"
+namespace_id = "2004"
+  [env.sync-lab.ratelimits.simple]
+  limit = 20
+  period = 60
+
+# Sync gets its own per-device budget, so a first full download on a new phone does not use up chat.
+[[env.sync-lab.ratelimits]]
+name = "SYNC_LIMITER"
+namespace_id = "2005"
+  [env.sync-lab.ratelimits.simple]
+  limit = 120
+  period = 60

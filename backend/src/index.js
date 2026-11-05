@@ -1,5 +1,6 @@
 import '../../arithmetic.js';
 import '../../visuals.js';
+import './sync.js';
 const GEMINI_CHAIN = [
   'gemini-3.8-flash','gemini-3.7-flash','gemini-3.6-flash',
   'gemini-3.5-flash-lite','gemini-3.1-flash-lite','gemini-2.5-flash'
@@ -785,6 +786,9 @@ export default {
       for(const k of candidates){ try{ valid ||= await verifyExport(k.secret,b.kid,b.signedAt,b.digest,b.mac); }catch{} }
       return json(valid?{valid:true}:{valid:false,reason:'signature'},200,c.headers);
     }
+
+    // SYNC1 candidate: 404 for every /sync/* path unless SYNC_ENABLED="1" and a SYNC_DB binding exist (sync-lab only).
+    if(url.pathname.startsWith('/sync/')) return SparkSyncWorker.handle(request,env,url,c,{json,readBody,verifyToken,sameCode,hmac});
 
     return json({error:'Ikke funnet.'},404,c.headers);
   }
