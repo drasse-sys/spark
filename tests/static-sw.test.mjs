@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import {webcrypto} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 import {read,root,script,html} from './helpers.mjs';
@@ -25,8 +26,8 @@ test('no provider key formats or credential assignments in static frontend files
 });
 function serviceWorker(fetcher){
   const handlers={},saved=new Map(),deleted=[],waits=[];
-  const cache={addAll:async files=>{for(const f of files){assert.equal(f.cache,'reload');saved.set(f.url,new Response('cached app'));}},match:async key=>saved.get(typeof key==='string'?key:key.url)?.clone(),put:async(key,response)=>saved.set(key,response)};
-  const ctx={self:{registration:{scope:'https://app.test/spark/'},location:{origin:'https://app.test'},clients:{claim:async()=>{}},skipWaiting:async()=>{},addEventListener:(name,fn)=>handlers[name]=fn},URL,Request,Response,Set,Promise,fetch:fetcher,caches:{open:async()=>cache,keys:async()=>['spark-old','other-app-cache'],delete:async key=>deleted.push(key)},setTimeout:fn=>setTimeout(fn,5),clearTimeout};
+  const cache={addAll:async files=>{for(const f of files){assert.equal(f.cache,'reload');saved.set(f.url,new Response(read(new URL(f.url).pathname.replace('/spark/',''))));}},match:async key=>saved.get(typeof key==='string'?key:key.url)?.clone(),put:async(key,response)=>saved.set(key,response)};
+  const ctx={crypto:webcrypto,TextEncoder,AbortSignal,self:{registration:{scope:'https://app.test/spark/'},location:{origin:'https://app.test'},clients:{claim:async()=>{}},skipWaiting:async()=>{},addEventListener:(name,fn)=>handlers[name]=fn},URL,Request,Response,Set,Promise,fetch:fetcher,caches:{open:async()=>cache,keys:async()=>['spark-old','other-app-cache'],delete:async key=>deleted.push(key)},setTimeout:fn=>setTimeout(fn,5),clearTimeout};
   vm.runInNewContext(read('sw.js'),ctx);
   async function dispatch(name){handlers[name]({waitUntil:p=>waits.push(p)});await Promise.all(waits.splice(0));}
   function get(url,extra={}){let response;handlers.fetch({request:{url,method:'GET',mode:'navigate',...extra},waitUntil:p=>waits.push(p),respondWith:p=>response=p});return response;}
@@ -34,19 +35,37 @@ function serviceWorker(fetcher){
 }
 test('SW install/update preserves unrelated origin caches and offline root opens cached app',async()=>{
   const sw=serviceWorker(async()=>{throw Error('offline');});await sw.dispatch('install');await sw.dispatch('activate');
-  assert.deepEqual(sw.deleted,['spark-old']);assert.equal(await (await sw.get('https://app.test/spark/')).text(),'cached app');
-  assert.equal(await (await sw.get('https://app.test/spark/spark.html?reload=1')).text(),'cached app');
+  assert.deepEqual(sw.deleted,['spark-old']);assert.equal(await (await sw.get('https://app.test/spark/')).text(),html);
+  assert.equal(await (await sw.get('https://app.test/spark/spark.html?reload=1')).text(),html);
 });
 test('SW excludes API, foreign resources and POSTs; errors do not poison app cache',async()=>{
   const sw=serviceWorker(async()=>new Response('server error',{status:500}));await sw.dispatch('install');
   assert.equal(sw.get('https://spark-family-api.drasse.workers.dev/health'),undefined);
   assert.equal(sw.get('https://app.test/chat',{mode:'cors'}),undefined);
   assert.equal(sw.get('https://app.test/spark/spark.html',{method:'POST'}),undefined);
-  assert.equal(await (await sw.get('https://app.test/spark/spark.html')).text(),'cached app');
-  assert.equal(await sw.saved.get('https://app.test/spark/spark.html').clone().text(),'cached app');
+  assert.equal(await (await sw.get('https://app.test/spark/spark.html')).text(),html);
+  assert.equal(await sw.saved.get('https://app.test/spark/spark.html').clone().text(),html);
 });
-test('slow network uses cache within deadline and successful response refreshes app',async()=>{
-  let resolve;const pending=new Promise(r=>resolve=r);const sw=serviceWorker(()=>pending);await sw.dispatch('install');
-  assert.equal(await (await sw.get('https://app.test/spark/spark.html')).text(),'cached app');
-  resolve(new Response('new generation'));await Promise.all(sw.waits);assert.equal(await sw.saved.get('https://app.test/spark/spark.html').clone().text(),'new generation');
+test('an installed generation ignores newer files and restores a missing file only if it matches',async()=>{
+  const file='https://app.test/spark/learning-ui.js';
+  let fetched=0, body='new generation';
+  const sw=serviceWorker(async()=>{fetched++;return new Response(body);});
+  await sw.dispatch('install');
+  assert.equal(await (await sw.get('https://app.test/spark/spark.html')).text(),html);
+  assert.equal(fetched,0);
+  sw.saved.delete(file);
+  assert.equal((await sw.get('https://app.test/spark/spark.html')).status,503);
+  assert.equal(sw.saved.has(file),false);
+  body=read('learning-ui.js');
+  assert.equal(await (await sw.get('https://app.test/spark/spark.html')).text(),html);
+  assert.equal(await sw.saved.get(file).clone().text(),body);
+});
+
+test('a mixed deployment fails installation without activating',async()=>{
+  const sw=serviceWorker(async()=>{throw Error('offline');});
+  // Install normally, then make a mismatched precache write in the next install.
+  await sw.dispatch('install');
+  const set=sw.saved.set.bind(sw.saved);
+  sw.saved.set=(url,value)=>set(url,url.endsWith('/learning-ui.js')?new Response('other release'):value);
+  await assert.rejects(sw.dispatch('install'),/Incomplete Spark release/);
 });

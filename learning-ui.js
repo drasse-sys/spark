@@ -74,7 +74,7 @@ function stripLearningMarkers(raw){return raw.replace(/\[\[[\s\S]*?(?:\]\]|$)/g,
 function learningReply(text,visuals=[]){chatMsgs.push({role:'assistant',text,ts:Date.now(),visuals});saveSession();render();}
 function ownHomeworkAnswer(){
   const s=ensureLearning(),t=s.task;
-  if(busy||readOnly||pendingFinal||s.check||s.practice||t.completed||!A.parse(t.expression))return;
+  if(busy||readOnly||pendingTurn||pendingFinal||s.check||s.practice||t.completed||!A.parse(t.expression))return;
   s.answerTarget={sid:s.id,task:t.id,child:active,expression:t.expression};
   learningReply('Sjekk hele regnestykket: '+t.expression+' = ?\nSkriv svaret, eller velg «Tilbake til samtalen».');
 }
@@ -117,7 +117,7 @@ function preparePractice(){
     chatMsgs=saved.chatMsgs;history=saved.history;transcript=saved.transcript;taskMode=saved.mode;currentSessionId=saved.id;restoreLearning(saved);
     if(!archiveSession(saved.pendingFinal?.summary||''))return false;
   }
-  stopSpeak();stopMic();readOnly=false;pendingFinal=null;chatMsgs=[];history=[];transcript='';currentSessionId='';$('msg').value='';taskMode='matte';freshLearning();learningSession.practice=true;view='chat';return true;
+  stopSpeak();stopMic();readOnly=false;pendingFinal=null;pendingTurn=false;turnNotice='';chatMsgs=[];history=[];transcript='';currentSessionId='';$('msg').value='';taskMode='matte';freshLearning();learningSession.practice=true;view='chat';return true;
 }
 function startPractice(type){
   const memory=kid().learning ||= L.empty(),now=Date.now();
@@ -143,7 +143,7 @@ function recordWord(item,ok,s,c){
   ensureLearning().events.push({skill:'readWord',t:now,s,ok,verified:true,k:'word',delayed:!!delayed,item:true});L.boundSession(learningSession);saveKids();
 }
 function helpStep(n){
-  if(busy||readOnly||pendingFinal)return;
+  if(busy||readOnly||pendingTurn||pendingFinal)return;
   const s=ensureLearning(),t=s.task;
   if(kid().age>=8&&!t.attempts&&!s.softHelp){s.softHelp=true;learningReply('Prøv ett steg først? Det er lov å bomme. Trykk på hjelpen igjen hvis du vil.');return;}
   touchLearning();L.support(t,n);s.softHelp=false;
@@ -155,14 +155,14 @@ function helpStep(n){
 }
 function learningQuick(){
   if(readOnly){quick.innerHTML='';return;}
-  const s=ensureLearning(),t=s.task,blocked=busy||pendingFinal?'disabled':'';
+  const s=ensureLearning(),t=s.task,blocked=busy||pendingTurn||pendingFinal?'disabled':'';
   // Every control that its handler would ignore is rendered disabled, so it never looks tappable.
   quick.innerHTML=`<span class="ladder-label">${['Du prøver selv','Liten påminnelse','Et hint','Mindre steg','Et eksempel'][t.s]} · velg hjelp når du vil</span>`+
     [[1,'Lite puff'],[2,'Lite hint'],[3,'Mindre steg'],[4,'Vis et eksempel']].map(([n,label])=>`<button class="qb" data-help="${n}" ${blocked}>${n}. ${label}</button>`).join('')+
     `<button class="qb" id="stuckBtn" ${blocked}>Jeg vet ikke</button><button class="qb" id="pauseLearning" ${busy?'disabled':''}>Pause / for vanskelig</button>`;
   quick.querySelectorAll('[data-help]').forEach(b=>{b.disabled ||= +b.dataset.help>2&&t.s<+b.dataset.help-1&&!t.attempts;b.onclick=()=>helpStep(+b.dataset.help);});
   $('stuckBtn').onclick=()=>{s.softHelp=true;helpStep(2);};
-  $('pauseLearning').onclick=()=>{if(busy)return;stopSpeak();stopMic();s.lastInteraction=null;saveSession();view='start';startNotice='Vi tar pause. Oppgaven er lagret, og du kan fortsette eller avslutte senere.';render();};
+  $('pauseLearning').onclick=()=>{if(busy)return;stopSpeak();stopMic();s.lastInteraction=null;if(!saveSession())return;view='start';startNotice='Vi tar pause. Oppgaven er lagret, og du kan fortsette eller avslutte senere.';render();};
 }
 function renderLearningPanel(box){
   if(readOnly)return;
@@ -181,10 +181,10 @@ function renderLearningPanel(box){
   if($('skipTransfer'))$('skipTransfer').onclick=()=>{s.transferOffer=null;saveSession();render();};
   if($('skipCheck'))$('skipCheck').onclick=()=>{if(busy)return;if(s.practice)advancePractice();else{nextLearningTask();learningReply('Vi fortsetter når du vil.');}};
   if($('nextLearningTask'))$('nextLearningTask').onclick=()=>{if(busy)return;nextLearningTask();learningReply('Skriv den neste deloppgaven når du er klar.');};
-  for(const id of ['checkHomework','trySelf','skipCheck','nextLearningTask'])if($(id))$(id).disabled=busy||id==='checkHomework'&&!!pendingFinal;
   if($('confidence')){$('confidence').value=s.confidence||'';$('confidence').onchange=e=>{s.confidence=e.target.value;saveSession();};}
   $('reflection').value=s.reflection||'';$('reflection').onchange=e=>{s.reflection=e.target.value;saveSession();};
   if(taskMode==='lesing')renderReading(box);
+  if(busy||pendingTurn||pendingFinal)panel.querySelectorAll('button,select').forEach(control=>control.disabled=true);
 }
 function learningStartHTML(){
   const memory=kid().learning ||= L.empty(),count=L.due(memory,Date.now()).length+L.dueWords(memory,Date.now()).length;
@@ -197,8 +197,10 @@ function bindLearningStart(){
   $('saveWords').onclick=()=>{
     const rows=$('wordList').value.split('\n').filter(s=>s.trim());
     if(rows.length>20||rows.some(s=>{const a=s.split('|');return a.length!==2||!a.every(x=>x.trim())||a[0].trim().length>60||a[1].trim().length>160;})){alert('Bruk ord | forklaring, én per linje, inntil 20.');return;}
+    const items=kid().learning.items.slice();
     for(const row of rows){const [word,meaning]=row.split('|').map(s=>s.trim());saveWord({word,meaning,sentence:''});}
-    saveKids();startNotice='Ordene er lagret på denne telefonen.';render();
+    if(!saveKids()){kid().learning.items=items;return;}
+    startNotice='Ordene er lagret på denne telefonen.';render();
   };
 }
 function saveWord(w){
@@ -241,15 +243,94 @@ function bindParent(){
       downloadText(text||JSON.stringify(learningExport()),text?'spark-laeringskopi-bekreftet.json':'spark-laeringskopi.json');
     }finally{button.disabled=false;}
   };
-  // Nothing is committed before the trust decision, the validation and the parent's choice; a failed save rolls back.
-  $('importLearning').onchange=async e=>{try{const file=e.target.files[0];if(!file||file.size>4000000)throw Error('For stor fil.');const {status,kids:imported}=await readLearningCopy(await file.text());if(!confirm(RESTORE_TEXT[status](imported.length)))return;const oldLength=kids.length;kids.push(...imported);if(!saveKids()){kids.length=oldLength;throw Error('Lagringen er full. Kopien er ikke importert.');}render();}catch(err){alert('Kunne ikke lese læringskopien: '+err.message);}};
-  $('recoverLearning').onclick=()=>{
-    const raw=store.getItem('spark_learning_backup');if(!raw){alert('Ingen migreringskopi finnes.');return;}
-    if(!confirm('Gjenopprette tidligere data som nye profiler? Nåværende barn beholdes.'))return;
-    try{const backup=JSON.parse(raw),old=JSON.parse(backup.kids||'[]');if(!Array.isArray(old))throw Error('Ugyldig eldre data');const imported=old.map(k=>({...blankKid(''),name:typeof k?.name==='string'?k.name:'Gjenopprettet',age:Number.isInteger(k?.age)?k.age:8,notes:Array.isArray(k?.notes)?k.notes.filter(n=>typeof n==='string'):[],log:Array.isArray(k?.log)?k.log.filter(e=>e&&['d','m','t'].every(x=>typeof e[x]==='string')).slice(-20):[],sessions:Array.isArray(k?.sessions)?k.sessions.filter(s=>validChat(s?.msgs)).map(s=>({...s,migratedAt:Number.isSafeInteger(s.migratedAt)?s.migratedAt:Date.now()})):[],learning:L.empty()}));imported.forEach(k=>L.prune(k,Date.now()));const offset=kids.length;kids.push(...imported);if(!saveKids()){kids.length=offset;return;}for(const [i,session] of backup.sessions||[]){if(i>=imported.length)continue;try{const s=JSON.parse(session);s.kid=offset+i;if(!Number.isSafeInteger(s.migratedAt)&&!Number.isSafeInteger(s.ts))s.migratedAt=Date.now();store.setItem(sessionKey(offset+i),JSON.stringify(s));}catch{}}render();}catch{alert('Kopien kunne ikke gjenopprettes automatisk. Den er bevart lokalt.');}
+  $('importLearning').onchange=async e=>{
+    const input=e.target,file=input.files[0];
+    if(!file)return;
+    input.disabled=true;
+    try{
+      if(file.size>4000000)throw Error('For stor fil.');
+      const {status,kids:imported}=await readLearningCopy(await file.text());
+      if(!input.isConnected||!confirm(RESTORE_TEXT[status](imported.length)))return;
+      const offset=kids.length;
+      kids.push(...imported.map(k=>({...k,recoveryId:newSessionId()})));
+      if(!saveKids()){kids.length=offset;throw Error('Lagringen er full. Kopien er ikke importert.');}
+      render();
+    }catch(err){if(input.isConnected)alert('Kunne ikke lese læringskopien: '+err.message);}
+    finally{input.value='';input.disabled=false;}
   };
-  $('deleteLearning').onclick=()=>{if(!confirm('Slette økter, notater, ord og læringshistorikk for dette barnet?'))return;const k=kid();k.notes=[];k.log=[];k.sessions=[];k.learning=L.empty();store.removeItem(sessionKey());const raw=store.getItem('spark_learning_backup');if(raw){try{const b=JSON.parse(raw),old=JSON.parse(b.kids||'[]');if(Array.isArray(old)){old[active]=null;b.kids=JSON.stringify(old);}b.sessions=(b.sessions||[]).filter(([i])=>i!==active);b.legacy=null;store.setItem('spark_learning_backup',JSON.stringify(b));}catch{store.removeItem('spark_learning_backup');}}resetLearning();chatMsgs=[];history=[];transcript='';saveKids();render();};
+  $('recoverLearning').onclick=()=>{
+    const raw=store.getItem('spark_learning_backup');
+    if(!raw){alert('Ingen migreringskopi finnes.');return;}
+    if(!confirm('Gjenopprette tidligere data som nye profiler? Nåværende barn beholdes.'))return;
+    try{restoreMigrationCopy(raw);render();}
+    catch{alert('Kopien kunne ikke gjenopprettes automatisk. Den er bevart lokalt.');}
+  };
+  $('deleteLearning').onclick=()=>{
+    if(!confirm('Slette økter, notater, ord og læringshistorikk for dette barnet?'))return;
+    const previous=kid();
+    kids[active]={...previous,notes:[],log:[],sessions:[],learning:L.empty(),
+      recoveryId:newSessionId(),legacyLearningDeleted:true};
+    if(!saveKids()){kids[active]=previous;return;}
+    store.removeItem(sessionKey());
+    const raw=store.getItem('spark_learning_backup');
+    if(raw){
+      try{
+        const backup=JSON.parse(raw),old=JSON.parse(backup.kids||'[]');
+        if(Array.isArray(old)){old[active]=null;backup.kids=JSON.stringify(old);}
+        backup.sessions=(backup.sessions||[]).filter(([i])=>i!==active);
+        const legacy=JSON.parse(backup.legacy||'null');
+        if(legacy && (legacy.kid??active)===active)backup.legacy=null;
+        store.setItem('spark_learning_backup',JSON.stringify(backup));
+      }catch{store.removeItem('spark_learning_backup');}
+    }
+    resetLearning();chatMsgs=[];history=[];transcript='';render();
+  };
 }
+function restoreMigrationCopy(raw){
+  const backup=JSON.parse(raw),old=JSON.parse(backup.kids||'[]');
+  if(!Array.isArray(old)||!old.length)throw Error('Ugyldig eldre data');
+  const now=Date.now(),offset=kids.length;
+  const imported=old.map((value,i)=>{
+    const k=kids[i]?.legacyLearningDeleted?null:value;
+    return {...blankKid(''),recoveryId:newSessionId(),name:typeof k?.name==='string'?k.name:'Gjenopprettet',
+      age:Number.isInteger(k?.age)?k.age:8,notes:Array.isArray(k?.notes)?k.notes.filter(n=>typeof n==='string'):[],
+      log:Array.isArray(k?.log)?k.log.filter(e=>e&&['d','m','t'].every(x=>typeof e[x]==='string')).slice(-20):[],
+      sessions:Array.isArray(k?.sessions)?k.sessions.filter(s=>validChat(s?.msgs)).map(s=>({...s,migratedAt:s.migratedAt||now})):[]};
+  });
+  const staged=[];
+  const candidates=new Map(backup.sessions||[]);
+  if(backup.legacy){
+    try{
+      const legacy=JSON.parse(backup.legacy);
+      if(Number.isInteger(legacy?.kid)&&!candidates.has(legacy.kid))candidates.set(legacy.kid,backup.legacy);
+    }catch{}
+  }
+  try{
+    // Staged sessions are only visible once their matching profiles are committed.
+    for(const [i,value] of candidates){
+      if(!Number.isInteger(i)||!imported[i]||kids[i]?.legacyLearningDeleted)continue;
+      let session;
+      try{session=JSON.parse(value);}catch{continue;}
+      if(!session || (session.kid!==undefined&&session.kid!==i) || !Object.hasOwn(MODE_NAME,session.mode) ||
+        !validChat(session.chatMsgs)||!validHistory(session.history)||typeof session.transcript!=='string')continue;
+      const key=sessionKey(offset+i), previous=store.getItem(key);
+      session.kid=offset+i;session.recoveryId=imported[i].recoveryId;
+      if(!Number.isSafeInteger(session.migratedAt)&&!Number.isSafeInteger(session.ts))session.migratedAt=now;
+      if(!store.setItem(key,JSON.stringify(session)))throw Error('Lagringen er full.');
+      staged.push({key,previous});
+    }
+    kids.push(...imported);
+    if(!saveKids())throw Error('Lagringen er full.');
+  }catch(err){
+    kids.length=offset;
+    for(const {key,previous} of staged){
+      if(previous===null)store.removeItem(key);
+      else store.setItem(key,previous);
+    }
+    throw err;
+  }
+}
+
 /* ---- TR1 trusted backup ----
    The Worker signs only a SHA-256 digest of the exact export bytes; the backup itself never leaves the phone.
    The file stores those bytes as a JSON string, so no canonical re-serialization is needed: restore hashes the same string. */
@@ -274,8 +355,7 @@ async function exportDigest(payload){
 const backupServer=()=>DEFAULT_SERVER_URL;
 async function backupRequest(path,body,auth){
   // A redirect could hand the answer to another origin, so none is followed.
-  const r=await fetchServer(path,{method:'POST',redirect:'error',headers:{'content-type':'application/json',...(auth?{authorization:'Bearer '+deviceToken}:{})},body:JSON.stringify(body)},backupServer());
-  return {r,d:await r.json().catch(()=>null)};
+  return fetchServer(path,{method:'POST',redirect:'error',headers:{'content-type':'application/json',...(auth?{authorization:'Bearer '+deviceToken}:{})},body:JSON.stringify(body)},backupServer());
 }
 // Signed container text, or an Error when signing is unavailable (not paired with the build's Worker, offline, secret missing, bad reply).
 async function signedLearningExport(){
@@ -355,5 +435,6 @@ function renderReading(box){
   node.querySelectorAll('[data-reading]').forEach(b=>b.onclick=()=>{if(busy)return;$('msg').value=b.dataset.reading;send();});
   if($('predictReading'))$('predictReading').onclick=()=>{if(busy)return;s.predictionUsed=true;$('msg').value='La meg gjette hva som skjer videre før vi leser slutten. Spør etter ett spor etterpå.';send();};
   node.querySelectorAll('[data-reading],#predictReading').forEach(b=>b.disabled=busy||!!pendingFinal);
+  if(busy||pendingTurn||pendingFinal)node.querySelectorAll('button,select').forEach(control=>control.disabled=true);
   node.querySelectorAll('[data-word]').forEach(b=>b.onclick=()=>{saveWord(pendingWords[+b.dataset.word]);saveKids();b.disabled=true;b.textContent='Lagret til senere';});
 }

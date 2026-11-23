@@ -162,16 +162,31 @@ const LS = { kids:'spark_kids', active:'spark_active', voice:'spark_voice',
 const DEFAULT_SERVER_URL = 'https://spark-family-api.drasse.workers.dev';
 
 let storageWarning = '', voiceNotice = '';
+const failedWrites=new Map();
+let storageReadFailed=false;
 function showStatus(){
   const el=document.getElementById('status');
-  el.textContent=[storageWarning,voiceNotice].filter(Boolean).join(' ');
+  el.textContent=[storageWarning || Array.from(failedWrites.values()).at(-1),voiceNotice].filter(Boolean).join(' ');
   el.classList.toggle('hide',!el.textContent);
 }
 const store = {
-  getItem(key){ try{return localStorage.getItem(key);}catch{ storageWarning='Lokal lagring er utilgjengelig. Ikke lukk appen før økten er lagret.'; showStatus(); return null;} },
-  setItem(key,value){ try{localStorage.setItem(key,value);return true;}catch{ storageWarning='Kunne ikke lagre på denne telefonen. Frigjør plass og prøv igjen. Behold appen åpen.'; showStatus();return false;} },
-  removeItem(key){ try{localStorage.removeItem(key);return true;}catch{ storageWarning='Kunne ikke oppdatere lokal lagring. Behold appen åpen og prøv igjen.';showStatus();return false;} }
+  getItem(key){ try{return localStorage.getItem(key);}catch{ storageReadFailed=true; storageWarning='Lokal lagring kunne ikke leses. Last appen på nytt før du fortsetter.'; showStatus(); return null;} },
+  setItem(key,value){ return writeStorage(key,()=>localStorage.setItem(key,value)); },
+  removeItem(key){ return writeStorage(key,()=>localStorage.removeItem(key),'Kunne ikke rydde opp i lokal lagring. Prøv igjen.'); }
 };
+
+function writeStorage(key,write,message='Kunne ikke lagre på denne telefonen. Frigjør plass og prøv igjen. Behold appen åpen.'){
+  if(storageReadFailed)return false;
+  try{
+    write();
+    if(failedWrites.delete(key))showStatus();
+    return true;
+  }catch{
+    failedWrites.set(key,message);
+    showStatus();
+    return false;
+  }
+}
 
 // Migrering fra v5.1: slett eventuelle gamle leverandør-nøkler fra nettleseren.
 ['spark_key','spark_backup_key','spark_backup_model','spark_backup','spark_prov','spark_model']
@@ -220,9 +235,14 @@ if(!Number.isInteger(active) || active<0 || active>=kids.length) active=0;
 const kid = () => kids[active];
 function saveKids(){
   if(!migrationReady){storageWarning='Migreringen kunne ikke lagres. Frigjør plass og last appen på nytt. Eksisterende data er bevart.';showStatus();return false;}
-  kids.forEach(k=>L.prune(k,Date.now()));
-  const saved=store.setItem(LS.kids, JSON.stringify(kids));
-  return store.setItem(LS.active, String(active)) && saved;
+  const now=Date.now();
+  const profiles=kids.map(k=>L.prune({...k,learning:{...k.learning,sessions:k.learning.sessions.map(session=>({...session}))}},now));
+  if(!store.setItem(LS.kids,JSON.stringify(profiles)))return false;
+  profiles.forEach((profile,i)=>{
+    kids[i].sessions=profile.sessions;
+    kids[i].learning.sessions=profile.learning.sessions;
+  });
+  return true;
 }
 
 /* ---- tilstand ---- */
@@ -255,13 +275,15 @@ let chatMsgs = [], history = [], transcript = '';
 let busy = false, speakingIdx = null, readOnly = false, backupAnnounced = false;
 let recognition = null, listening = false;
 let startNotice = '';
-let pendingFinal = null, photoLoad = 0, currentSessionId = '';
+let pendingFinal = null, pendingTurn = false, turnNotice = '', photoLoad = 0, currentSessionId = '';
+let draftTimer;
 const newSessionId = () => Date.now().toString(36)+'-'+Math.random().toString(36).slice(2);
 function chooseChild(index){
   if(index===active) return;
+  if(busy || !store.setItem(LS.active,String(index))) return;
   stopSpeak(); stopMic(); photoLoad++; hwPreview=null; hwText=''; $('msg').value='';
   chatMsgs=[]; history=[]; transcript=''; pendingFinal=null; readOnly=false; currentSessionId='';
-  resetLearning(); active=index; saveKids();
+  pendingTurn=false; turnNotice=''; resetLearning(); active=index;
 }
 
 const $ = id => document.getElementById(id);
@@ -410,10 +432,11 @@ function saveSession(){
   if(learningSession)L.boundSession(learningSession);
   if(!migrationReady)return false;
   try{
+    clearTimeout(draftTimer);
     if(!currentSessionId) currentSessionId=newSessionId();
     return store.setItem(sessionKey(), JSON.stringify({
       id:currentSessionId, kid:active, mode:taskMode, transcript,
-      chatMsgs, history:transcript?slimHistory():history, pendingFinal, usingBackup, ts:Date.now(), learning:ensureLearning(), schema:3
+      chatMsgs, history:transcript?slimHistory():history, pendingFinal, pendingTurn, draft:$('msg').value, usingBackup, ts:Date.now(), learning:ensureLearning(), schema:3, recoveryId:kid().recoveryId
     }));
   }catch(e){ storageWarning='Kunne ikke lagre økten. Behold appen åpen og prøv igjen.';showStatus();return false; }
 }
@@ -421,15 +444,16 @@ function loadSession(i=active){
   try{
     const s = JSON.parse(store.getItem(sessionKey(i))||'null');
     if(!s || s.kid!==i || !Object.hasOwn(MODE_NAME,s.mode) || !validChat(s.chatMsgs) || !validHistory(s.history) || typeof s.transcript!=='string') return null;
+    if(s.recoveryId!==kids[i]?.recoveryId) return null;
+    if(s.id && kids[i]?.sessions.some(archived=>archived.id===s.id)) return null;
     const savedAt=[s.ts,s.migratedAt].find(t=>Number.isSafeInteger(t)&&t>0);
     if(savedAt&&Date.now()-savedAt>=30*L.DAY){
       if(s.learning?.id&&Array.isArray(s.learning.events)&&!kids[i].learning.sessions.some(a=>a.id===s.learning.id)){
         kids[i].learning.sessions.push(L.aggregate(s.learning,s.mode,savedAt));
-        if(!saveKids())return null;
+        if(!saveKids()){kids[i].learning.sessions.pop();return s;}
       }
       store.removeItem(sessionKey(i));return null;
     }
-    if(s.id && kids[i]?.sessions.some(archived=>archived.id===s.id)) return null;
     return s;
   }catch(e){ return null; }
 }
@@ -442,36 +466,42 @@ function resumeSession(){
   chatMsgs = s.chatMsgs; history = s.history;
   currentSessionId=typeof s.id==='string'?s.id:newSessionId();
   restoreLearning(s);
-  pendingFinal=typeof s.pendingFinal?.summary==='string'?s.pendingFinal:null;
+  pendingFinal=s.pendingFinal?.summary===null || typeof s.pendingFinal?.summary==='string'?s.pendingFinal:null;
+  const lastMessage=s.chatMsgs.findLast(m=>!m.sys || m.role==='user');
+  const legacyPending=s.pendingTurn===undefined && !s.learning?.practice && !s.learning?.check &&
+    s.history.at(-1).role==='user' && lastMessage?.role==='user' && !pendingFinal;
+  pendingTurn=s.pendingTurn===true || legacyPending; turnNotice='';
   usingBackup=!!s.usingBackup; backupAnnounced=usingBackup;
-  $('msg').value='';
+  $('msg').value=typeof s.draft==='string'?s.draft:'';
   view='chat'; render();
 }
 function archiveSession(summary=''){
   if(!chatMsgs.length) return true;
-  const k = kid();
-  const previous=k.sessions;
-  const previousLearning=(k.learning ||= L.empty()).sessions.slice();
-  const ls=ensureLearning();
+  const previous=kid(), ls=ensureLearning();
   const endedAt=Date.now();
-  if(ls.reflection&&ls.task?.skill&&k.learning.skills[ls.task.skill]&&ls.task.s<=1&&ls.task.completed)k.learning.skills[ls.task.skill].helped=ls.reflection;
+  const k={...previous,log:previous.log.slice(),sessions:previous.sessions.slice(),
+    learning:{...previous.learning,skills:{...previous.learning.skills},sessions:previous.learning.sessions.slice()}};
+  const skill=ls.task?.skill;
+  if(ls.reflection&&skill&&k.learning.skills[skill]&&ls.task.s<=1&&ls.task.completed){
+    k.learning.skills[skill]={...k.learning.skills[skill],helped:ls.reflection};
+  }
   if(!k.learning.sessions.some(s=>s.id===ls.id))k.learning.sessions.push(L.aggregate(ls,taskMode,endedAt));
-  if(!k.sessions) k.sessions = [];
-  k.sessions=k.sessions.slice();
-  k.sessions.push({
-    id:currentSessionId || newSessionId(),
-    d:new Date().toLocaleDateString('no-NO'),
-    startedAt:ls.startedAt, endedAt,
-    m:taskMode,
-    t:(transcript||chatMsgs[0]?.text||'Økt').slice(0,60),
-    summary:(summary||'').slice(0,260),
-    msgs:chatMsgs.slice(-40)
-  });
-  // Retain structured aggregates independently of transcript retention.
-  L.prune(k,Date.now());
-  if(!saveKids()){ k.sessions=previous; k.learning.sessions=previousLearning; return false; }
-  if(store.removeItem(sessionKey())) storageWarning='';
-  showStatus();
+  if(!k.sessions.some(s=>s.id===currentSessionId)){
+    if(summary&&!ls.practice)addParentLog(summary,k);
+    k.sessions.push({
+      id:currentSessionId,
+      d:new Date().toLocaleDateString('no-NO'),
+      startedAt:ls.startedAt, endedAt,
+      m:taskMode,
+      t:(transcript||chatMsgs[0]?.text||'Økt').slice(0,60),
+      summary:(summary||'').slice(0,260),
+      msgs:chatMsgs.slice(-40)
+    });
+  }
+  kids[active]=L.prune(k,endedAt);
+  if(!saveKids()){kids[active]=previous;return false;}
+  clearTimeout(draftTimer);
+  store.removeItem(sessionKey());
   return true;
 }
 
@@ -487,7 +517,11 @@ function isMinuteQuota(err){
 async function fetchServer(path, options, base){
   const controller=new AbortController();
   const timer=setTimeout(()=>controller.abort(),path==='/pair'||path.startsWith('/backup/')?20000:150000);
-  try{return await fetch(base?base+path:endpoint(path),{...options,signal:controller.signal});}
+  try{
+    const r=await fetch(base?base+path:endpoint(path),{...options,signal:controller.signal});
+    const d=await r.json().catch(err=>{if(controller.signal.aborted)throw err;return null;});
+    return {r,d};
+  }
   catch(err){
     if(controller.signal.aborted) throw new Error('Spark-serveren brukte for lang tid. Vent litt og prøv igjen.');
     throw err;
@@ -501,12 +535,11 @@ async function pairDevice(code){
   serverUrl=normalizeServer(serverUrl);
   if(!validServer(serverUrl)) throw new Error('Serveradressen må være en HTTPS-adresse uten sti. Lokal testing kan bruke http://localhost.');
   if(!code || code.trim().length<6) throw new Error('Familiekoden mangler eller er for kort.');
-  const r=await fetchServer('/pair',{
+  const {r,d}=await fetchServer('/pair',{
     method:'POST', headers:{'content-type':'application/json'},
     body:JSON.stringify({code:code.trim(), deviceName:'Spark-enhet'})
   });
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok || !d.token) throw new Error(d.error||('Kunne ikke koble enheten ('+r.status+').'));
+  if(!r.ok || !d?.token) throw new Error(d?.error||('Kunne ikke koble enheten ('+r.status+').'));
   deviceToken=d.token; tokenServer=serverUrl;
   store.setItem(LS.server,serverUrl);
   store.setItem(LS.device,deviceToken);
@@ -522,19 +555,19 @@ let usingBackup = false;
 async function callAI(messages){
   if(!paired()) throw new Error('Denne enheten er ikke koblet til Spark-serveren. Åpne ⚙️ Innstillinger.');
   const k=kid();
-  const r=await fetchServer('/chat',{
+  const {r,d:data}=await fetchServer('/chat',{
     method:'POST',
     headers:{'content-type':'application/json','authorization':'Bearer '+deviceToken},
     body:JSON.stringify({mode:taskMode,age:k.age,name:k.name||'',interests:k.interests||'',notes:(k.notes||[]).slice(-8),sessionState:learningContext(),messages,transcript:transcript||''})
   });
-  const d=await r.json().catch(()=>({}));
+  const d=data||{};
   if(r.status===401 && !d.kind){
     unpairDevice();
     const e=new Error('Koblingen til Spark-serveren er utløpt. En forelder må koble denne enheten på nytt i ⚙️.');
     e.status=401; throw e;
   }
   if(!r.ok || typeof d.text!=='string' || !d.text.trim()){
-    const e=new Error(d.error||('Spark-serverfeil ('+r.status+')'));
+    const e=new Error(d.error||(r.ok?'Spark fikk et ufullstendig svar. Prøv igjen.':'Spark-serverfeil ('+r.status+')'));
     e.status=r.status; e.kind=d.kind||''; e.details=(d.kind||'')+' '+(d.details||''); throw e;
   }
   ensureLearning().interventions+=(d.verifier?.interventions||0);
@@ -543,10 +576,9 @@ async function callAI(messages){
 }
 
 /* ============ PROFIL-LÆRING + POENG ============ */
-function addParentLog(entry){
+function addParentLog(entry,k=kid()){
   const clean=(entry||'').trim().replace(/\s+/g,' ').slice(0,240);
   if(!clean) return false;
-  const k=kid();
   const last=k.log[k.log.length-1];
   if(last && last.m===taskMode && last.t===clean) return false;
   k.log.push({ d:new Date().toLocaleDateString('no-NO'), ts:Date.now(), m:taskMode, t:clean });
@@ -617,14 +649,16 @@ function render(){
   foot.classList.toggle('hide', view!=='chat' || readOnly);
   quick.classList.toggle('hide', view!=='chat' || readOnly);
   doneBar.classList.toggle('hide', view!=='chat' || readOnly);
-  $('doneBtn').disabled = busy || chatMsgs.length < 2;
-  $('doneBtn').textContent=pendingFinal?'💾 Prøv å lagre ferdig økt igjen':'✅ Ferdig med leksa';
+  $('doneBtn').disabled = busy || pendingTurn || chatMsgs.length < 2;
+  $('doneBtn').textContent=typeof pendingFinal?.summary==='string'?'💾 Prøv å lagre ferdig økt igjen':pendingFinal?'✅ Fullfør avslutningen':'✅ Ferdig med leksa';
   ['backBtn','newBtn','cogBtn'].forEach(id=>$(id).disabled=busy);
-  $('sendBtn').disabled=busy || readOnly || !!pendingFinal;
-  $('micBtn').disabled=busy || !!pendingFinal;
+  $('sendBtn').disabled=busy || readOnly || pendingTurn || !!pendingFinal;
+  $('micBtn').disabled=busy || pendingTurn || !!pendingFinal;
+  $('msg').disabled=readOnly || pendingTurn || !!pendingFinal;
   showStatus();
-  if(view==='setup') return renderSetup();
   if(view==='start') return renderStart();
+  photoLoad++;
+  if(view==='setup') return renderSetup();
   if(view==='chat')  return renderChat();
   if(view==='hist')  return renderHist();
 }
@@ -650,7 +684,7 @@ function renderHist(){
   </div>`;
   main.querySelectorAll('[data-s]').forEach(el=>el.onclick=()=>{
     const s = k.sessions[parseInt(el.dataset.s,10)];
-    resetLearning(); chatMsgs = s.msgs.length?s.msgs.slice():[{role:'assistant',text:s.summary||'Samtaleteksten er slettet.',sys:true}]; history=[]; transcript=''; taskMode=s.m; pendingFinal=null; $('msg').value='';
+    resetLearning(); chatMsgs = s.msgs.length?s.msgs.slice():[{role:'assistant',text:s.summary||'Samtaleteksten er slettet.',sys:true}]; history=[]; transcript=''; taskMode=s.m; pendingFinal=null; pendingTurn=false; turnNotice=''; $('msg').value='';
     view='chat'; readOnly=true; render();
   });
   $('backHist').onclick=()=>{ view='start'; render(); };
@@ -751,7 +785,12 @@ ${parentHTML()}
   document.querySelectorAll('#kidRow .kid[data-i]').forEach(t=>t.onclick=()=>{
     if(busy || !saveForm()) return; chooseChild(parseInt(t.dataset.i,10)); render();
   });
-  $('addKid').onclick=()=>{ if(busy || !saveForm()) return; kids.push(blankKid('')); chooseChild(kids.length-1); render(); };
+  $('addKid').onclick=()=>{
+    if(busy || !saveForm()) return;
+    kids.push({...blankKid(''),recoveryId:newSessionId()});
+    if(!saveKids()){kids.pop();return;}
+    chooseChild(kids.length-1); render();
+  };
   if($('clrLog')) $('clrLog').onclick=()=>{ if(confirm('Tømme undervisningsloggen?')){ kid().log=[]; saveKids(); render(); } };
   if($('clrNotes')) $('clrNotes').onclick=()=>{ if(confirm('Nullstille alt Spark har lært om dette barnet?')){ kid().notes=[]; saveKids(); render(); } };
   if($('fVoice')) $('fVoice').onchange=()=>{ voiceName=$('fVoice').value; store.setItem(LS.voiceName,voiceName); };
@@ -774,21 +813,25 @@ ${parentHTML()}
   $('saveBtn').onclick=()=>{
     if(!saveForm()) return;
     if(!paired()){ alert('Koble denne enheten til Spark-serveren først.'); render(); return; }
-    saveKids(); view='start'; render();
+    view='start'; render();
   };
 }
 
 function saveForm(){
   if(busy) return false;
-  const oldServer=serverUrl;
-  if($('fServer')) serverUrl=normalizeServer($('fServer').value) || DEFAULT_SERVER_URL;
-  if($('fVoice')){ voiceName=$('fVoice').value; store.setItem(LS.voiceName,voiceName); }
-  if($('fName')) kid().name=$('fName').value.trim().slice(0,40);
-  if($('fAge')){ const a=parseInt($('fAge').value,10); if(!isNaN(a)&&a>=4&&a<=16) kid().age=a; }
-  if($('fFun')) kid().interests=$('fFun').value.trim().slice(0,120);
-  if(!validServer(serverUrl)){serverUrl=oldServer;alert('Bruk en gyldig HTTPS-serveradresse uten sti.');return false;}
-  const saved=store.setItem(LS.server,serverUrl);
-  return saveKids() && saved;
+  const address=normalizeServer($('fServer')?.value??serverUrl) || DEFAULT_SERVER_URL;
+  if(!validServer(address)){alert('Bruk en gyldig HTTPS-serveradresse uten sti.');return false;}
+  const old=kid(), updated={...old};
+  if($('fName'))updated.name=$('fName').value.trim().slice(0,40);
+  if($('fAge')){ const a=parseInt($('fAge').value,10); if(a>=4&&a<=16)updated.age=a; }
+  if($('fFun'))updated.interests=$('fFun').value.trim().slice(0,120);
+  if(address!==serverUrl){
+    if(!store.setItem(LS.server,address))return false;
+    serverUrl=address;
+  }
+  kids[active]=updated;
+  if(!saveKids()){kids[active]=old;return false;}
+  return true;
 }
 
 function renderStart(){
@@ -849,7 +892,7 @@ function renderStart(){
       </div>
     `}
 
-    <button class="btn" id="go" ${(inputMode==='camera'? !hwPreview : hwText.trim().length<4)?'disabled':''}>
+    <button class="btn" id="go" ${(!paired() || (inputMode==='camera'? !hwPreview : hwText.trim().length<4))?'disabled':''}>
       🚀 Sett i gang!
     </button>
 
@@ -863,7 +906,7 @@ function renderStart(){
   if($('resumeBtn')) $('resumeBtn').onclick=resumeSession;
   if($('histBtn')) $('histBtn').onclick=()=>{ view='hist'; render(); };
   document.querySelectorAll('#modeTabs .tab').forEach(t=>t.onclick=()=>{taskMode=t.dataset.t;render()});
-  document.querySelectorAll('#inTabs .tab').forEach(t=>t.onclick=()=>{inputMode=t.dataset.m;render()});
+  document.querySelectorAll('#inTabs .tab').forEach(t=>t.onclick=()=>{if(inputMode!==t.dataset.m)photoLoad++;inputMode=t.dataset.m;render()});
   if($('kidPick')) document.querySelectorAll('#kidPick .kid').forEach(t=>t.onclick=()=>{
     chooseChild(parseInt(t.dataset.i,10)); render();
   });
@@ -872,11 +915,13 @@ function renderStart(){
   if(file) file.onchange=async e=>{
     const f=e.target.files[0]; if(!f) return;
     const load=++photoLoad, owner=active;
-    try{ const image=await shrink(f); if(load===photoLoad && owner===active && view==='start'){hwPreview=image;render();} }
-    catch(err){if(load===photoLoad) alert(err.message);}
+    hwPreview=null; render();
+    const stillChoosing=()=>load===photoLoad && owner===active && view==='start' && inputMode==='camera';
+    try{ const image=await shrink(f); if(stillChoosing()){hwPreview=image;render();} }
+    catch(err){if(stillChoosing()) alert(err.message);}
   };
   if($('clearImg')) $('clearImg').onclick=()=>{photoLoad++;hwPreview=null;render()};
-  if($('hwT')) $('hwT').oninput=e=>{hwText=e.target.value; $('go').disabled=hwText.trim().length<4};
+  if($('hwT')) $('hwT').oninput=e=>{hwText=e.target.value; $('go').disabled=!paired()||hwText.trim().length<4};
   $('go').onclick=start;
 }
 
@@ -904,6 +949,13 @@ function renderChat(){
     }
     box.appendChild(row);
   });
+  if(pendingTurn&&!busy){
+    const retry=document.createElement('div');
+    retry.className='note info';
+    retry.innerHTML='<p>'+esc(turnNotice||'Spark mangler et svar på den siste meldingen.')+'</p><button class="btn sm" id="retryTurn">Prøv samme melding igjen</button>';
+    box.appendChild(retry);
+    $('retryTurn').onclick=()=>turn();
+  }
   if(busy){
     const row=document.createElement('div');row.className='row';
     row.innerHTML=`<div class="av">⚡</div><div class="dots"><i></i><i></i><i></i></div>`;
@@ -949,13 +1001,14 @@ async function start(){
   readOnly=false; transcript=''; pendingFinal=null; currentSessionId=''; usingBackup=false; backupAnnounced=false; $('msg').value='';
   initHomeworkLearning(inputMode==='text'?hwText:'');
   chatMsgs.forEach(m=>m.ts=Date.now());
-  view='chat'; busy=true; saveSession(); render();
+  photoLoad++; hwPreview=null; hwText='';
+  view='chat'; pendingTurn=true; turnNotice='';
   await turn();
 }
 
 async function send(){
   const t=$('msg').value.trim();
-  if(!t||busy||readOnly||pendingFinal||view!=='chat') return;
+  if(!t||busy||readOnly||pendingFinal||pendingTurn||view!=='chat') return;
   if(interceptAnswer(t))return;
   touchLearning(); ensureLearning().task.attempts++;
   if(!ensureLearning().task.expression){const expression=detectExpression(t);if(expression){learningSession.task.expression=expression;learningSession.task.skill=arithmeticSkill(expression);}}
@@ -963,11 +1016,17 @@ async function send(){
   $('msg').value=''; $('msg').style.height='auto';
   chatMsgs.push({role:'user',text:t,ts:Date.now()});
   history.push({role:'user',content:t});
-  busy=true; saveSession(); render();
+  pendingTurn=true; turnNotice='';
   await turn();
 }
 
-async function turn(retried){
+async function turn(){
+  if(busy || !pendingTurn || readOnly || view!=='chat')return;
+  if(!saveSession()){render();return;}
+  stopSpeak(); stopMic(); busy=true; render();
+  await requestTurn();
+}
+async function requestTurn(retried){
   try{
     const raw = await callAI(payload());
     history.push({role:'assistant',content:raw});
@@ -979,7 +1038,9 @@ async function turn(retried){
         sys:true});
     }
     chatMsgs.push({role:'assistant',text:shown,ts:Date.now(),visuals:nextVisuals});
-    busy=false; saveSession(); render();
+    pendingTurn=false; turnNotice=''; busy=false;
+    if(transcript)history=slimHistory();
+    saveSession(); render();
     speak(shown, chatMsgs.length-1);
   }catch(err){
     let m = err.message||'Ukjent feil';
@@ -991,12 +1052,12 @@ async function turn(retried){
       render();
       await new Promise(r=>setTimeout(r,30000));
       chatMsgs.pop();
-      return turn(true);
+      return requestTurn(true);
     }
 
     busy=false;
     if(isDailyQuota(err))
-      m = 'Dagens gratis-kvote er brukt opp. Økten er lagret — dere kan fortsette i morgen. 😊';
+      m = 'Dagens gratis-kvote er brukt opp. Prøv igjen i morgen.';
     else if(isMinuteQuota(err))
       m = 'For mange spørsmål på kort tid. Vent et minutt og prøv igjen.';
     else if(!err.kind && /koblet|401|403|PERMISSION/i.test(m))
@@ -1005,8 +1066,7 @@ async function turn(retried){
       m = 'AI-tjenesten er midlertidig utilgjengelig. Økten beholdes her. Vent litt og prøv igjen.';
     else if(/Failed to fetch|NetworkError/i.test(m))
       m = 'Fikk ikke kontakt med nettet. Sjekk forbindelsen og prøv igjen.';
-    chatMsgs.push({role:'assistant',text:'Oi! '+m,sys:true});
-    saveSession(); render();
+    turnNotice=m; render();
   }
 }
 
@@ -1018,15 +1078,21 @@ function fallbackFinalSummary(){
 }
 
 async function finishHomework(){
-  if(busy || readOnly || chatMsgs.length<2) return;
+  if(busy || readOnly || pendingTurn || chatMsgs.length<2) return;
   const ok=pendingFinal || confirm('Ferdig med leksa? Spark lager en kort oppsummering til foreldrene og lagrer økten.');
   if(!ok) return;
 
+  const summaryReady=typeof pendingFinal?.summary==='string';
+  if(!summaryReady){
+    const previous=pendingFinal;
+    pendingFinal={summary:null};
+    if(!saveSession()){pendingFinal=previous;render();return;}
+  }
   stopSpeak(); stopMic(); busy=true; render();
-  let summary=pendingFinal?.summary||'';
+  let summary=pendingFinal.summary||'';
   let closing='Økten er ferdig.';
-  if(!pendingFinal&&learningSession?.practice){summary='Kort øverunde. Se læringsoversikten for støtte og øving.';}
-  else if(!pendingFinal) try{
+  if(!summaryReady&&learningSession?.practice){summary='Kort øverunde. Se læringsoversikten for støtte og øving.';}
+  else if(!summaryReady) try{
     const finalPrompt = `Barnet eller forelderen har nå trykket «Ferdig med leksa». Avslutt økten nå.
 Skriv først EN kort, varm avslutning til barnet, uten spørsmål og uten ny oppgave.
 Legg deretter aller sist NØYAKTIG én skjult foreldresammendrag-linje i dette formatet:
@@ -1036,24 +1102,20 @@ Vær konkret og ærlig ut fra denne samtalen. Ikke legg til PROFIL eller OPPGAVE
     const raw = await callAI(finalMessages);
     const lm = raw.match(/\[\[LOGG:\s*([^\]]+)\]\]/i);
     if(lm) summary = lm[1].trim().replace(/\s+/g,' ').slice(0,240);
-    closing = harvest(raw,true) || closing;
-    if(!summary){
-      summary = fallbackFinalSummary();
-      if(addParentLog(summary)) saveKids();
-    }
+    closing = demarkdown(stripLearningMarkers(raw)) || closing;
+    if(!summary)summary=fallbackFinalSummary();
   }catch(err){
     summary = fallbackFinalSummary();
-    if(addParentLog(summary)) saveKids();
-    closing = 'Økten er ferdig.';
   }
 
-  if(!pendingFinal) chatMsgs.push({role:'assistant',text:closing});
-  pendingFinal={summary}; saveSession();
+  if(!summaryReady){
+    chatMsgs.push({role:'assistant',text:closing});
+    pendingFinal={summary}; saveSession();
+  }
   busy=false;
   if(!archiveSession(summary)){render();return;}
-  pendingFinal=null;
   startNotice='Økten er ferdig og lagret. Du kan ta fri nå.';
-  readOnly=false; pendingFinal=null; photoLoad++; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
+  readOnly=false; pendingFinal=null; pendingTurn=false; turnNotice=''; photoLoad++; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
   usingBackup=false; backupAnnounced=false; resetLearning();
   view='start'; render();
 }
@@ -1061,11 +1123,14 @@ Vær konkret og ærlig ut fra denne samtalen. Ikke legg til PROFIL eller OPPGAVE
 /* ================= TALE INN ================= */
 function speechInputSupported(){ return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
 function toggleMic(){
-  if(!speechInputSupported() || busy || readOnly || pendingFinal || view!=='chat') return;
-  if(listening && recognition){ recognition.stop(); return; }
+  if(!speechInputSupported() || busy || readOnly || pendingFinal || pendingTurn || view!=='chat') return;
+  if(recognition){stopMic();render();return;}
   stopSpeak();
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  const current = new SR(); recognition=current;
+  let current;
+  try{ current=new SR(); }catch{ voiceNotice='Mikrofonen kunne ikke starte. Skriv svaret i stedet.';showStatus();return; }
+  recognition=current; listening=true; render();
+  const originalDraft=$('msg').value;
   recognition.lang='nb-NO'; recognition.interimResults=false; recognition.maxAlternatives=1;
   recognition.onstart=()=>{ if(recognition!==current)return;listening=true; render(); };
   recognition.onend=()=>{ if(recognition!==current)return;listening=false; recognition=null; render(); };
@@ -1073,14 +1138,14 @@ function toggleMic(){
     if(recognition!==current)return;
     listening=false; recognition=null;
     if(e.error!=='aborted' && e.error!=='no-speech'){
-      chatMsgs.push({role:'assistant',text:'🎙️ Jeg fikk ikke tak i det du sa. Prøv igjen eller skriv svaret.',sys:true});
+      voiceNotice='🎙️ Jeg fikk ikke tak i det du sa. Prøv igjen eller skriv svaret.';
     }
     render();
   };
   recognition.onresult=e=>{
     if(recognition!==current || view!=='chat' || busy || readOnly)return;
     const said=(e.results?.[0]?.[0]?.transcript||'').trim();
-    if(said){ $('msg').value=said; $('msg').dispatchEvent(new Event('input')); voiceNotice='Talen er et tekstforslag. Sjekk og rett teksten før du sender. Spark vurderer ikke uttale.';showStatus(); }
+    if(said && $('msg').value===originalDraft){ $('msg').value=[originalDraft,said].filter(Boolean).join(' '); $('msg').dispatchEvent(new Event('input')); voiceNotice='Talen er et tekstforslag. Sjekk og rett teksten før du sender. Spark vurderer ikke uttale.';showStatus(); }
   };
   try{ recognition.start(); }catch(e){ listening=false; recognition=null; alert('Mikrofonen kunne ikke starte. Sjekk mikrofontillatelsen eller skriv svaret.'); render(); }
 }
@@ -1095,6 +1160,10 @@ $('msg').addEventListener('keydown',e=>{
 $('msg').addEventListener('input',e=>{
   e.target.style.height='auto';
   e.target.style.height=Math.min(e.target.scrollHeight,96)+'px';
+  if(view==='chat'&&!readOnly&&!pendingTurn&&!pendingFinal){
+    clearTimeout(draftTimer);
+    draftTimer=setTimeout(()=>saveSession(),400);
+  }
 });
 $('voiceBtn').onclick=()=>{
   voiceOn=!voiceOn; store.setItem(LS.voice,voiceOn?'1':'0');
@@ -1108,11 +1177,11 @@ $('backBtn').onclick=()=>{                       // tilbake, økten beholdes
 $('newBtn').onclick=()=>{                        // ny oppgave, den gamle arkiveres
   if(busy) return;
   startNotice=''; stopSpeak(); stopMic();
-  if(!readOnly && chatMsgs.length>1){
+  if(!readOnly && chatMsgs.length){
     if(!confirm('Starte på en ny oppgave? Denne økten lagres under «Tidligere økter».')) return;
     if(!archiveSession(pendingFinal?.summary||'')) return;
   }
-  readOnly=false; pendingFinal=null; photoLoad++; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
+  readOnly=false; pendingFinal=null; pendingTurn=false; turnNotice=''; photoLoad++; hwPreview=null; hwText=''; chatMsgs=[]; history=[]; transcript='';
   view='start'; render();
 };
 $('cogBtn').onclick=()=>{if(busy) return;stopSpeak();stopMic();if(view==='chat'&&!readOnly&&!saveSession())return;view='setup';render()};
@@ -1138,7 +1207,17 @@ if('serviceWorker' in navigator && location.protocol.startsWith('http')){
 }
 
 window.addEventListener('pagehide',()=>{if(view==='chat'&&!readOnly) saveSession();});
-document.addEventListener('visibilitychange',()=>{if(document.hidden && view==='chat'&&!readOnly){if(learningSession)learningSession.lastInteraction=null;stopMic();stopSpeak();saveSession();}});
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden){
+    if(view==='chat')render();
+    return;
+  }
+  stopMic();stopSpeak();
+  if(view==='chat'&&!readOnly){
+    if(learningSession)learningSession.lastInteraction=null;
+    saveSession();
+  }
+});
 render();
 </script>
 </body>
