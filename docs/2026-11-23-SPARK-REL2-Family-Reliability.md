@@ -24,7 +24,7 @@
 - JavaScript syntax, manifest and Worker configuration parsing, Worker dry-run, and `git diff --check` passed.
 - Focused review covered data loss, child attribution, duplicate actions, failed saves, mobile lifecycle, network recovery, restore atomicity, and cache generation boundaries. The review added the startup read guard and the old-session aggregate failure regression. Prepared photo data is released after start and discarded from live request history once a transcript is available.
 - Production read-only check against the baseline matched all nine Pages assets and passed Worker health, CORS, preflight and unauthorized-request probes. The optional strict deployment check found the already-deployed Worker at `c3r1-20261022`, while canonical main declares `rh1-20261031`. REL2 changes no Worker code.
-- GitHub CI result will be recorded after the PR run.
+- GitHub CI passed on implementation commit `98fd70e6adf38a5e2acbf7699c43073650789b34`, including all five browser suites. [Implementation CI run](https://github.com/drasse-sys/spark/actions/runs/45235885078). A documentation-only follow-up records this result. [PR #8 checks](https://github.com/drasse-sys/spark/pull/8/checks).
 
 ## Follow-up
 
