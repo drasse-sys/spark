@@ -1,11 +1,11 @@
 /* Cache one verified app generation. API traffic never enters this cache. */
-const CACHE = 'spark-family-20261123-rel2';
+const CACHE = 'spark-family-20261123-rel3';
 const CODE = {
-  './spark.html':'8b2b37987e50c0e5559e68e5794e23d146a8db81650e316b061ffb9710158da6',
+  './spark.html':'1f50c44d9ecdf59f54db7168960a43209ae49735faf5faba35f7eb42643958be',
   './arithmetic.js':'05f0cf40c6c7651773e28e12de3083461060a34b5ed7d48e86e0128733b83257',
   './learning.js':'923ce0b56ea1bba469f905ca362cb13a64c21ee275eedff181bd7e64f7faa87e',
   './visuals.js':'97f04390e2fae59b583d6e154aaa629ddd4eccc45f45f207d99b46798a3aa611',
-  './learning-ui.js':'06af0d9dc8b4e400c179d672a7a3c4b07719f455cab7d01fddb63de584af8d47',
+  './learning-ui.js':'cd0ff413b377e48a6c848907f014b39019f26b7be02e2aa3a3b2e317539d3bd5',
 };
 const STATIC = new Map([
   ...Object.keys(CODE), './manifest.json', './icon-192.png', './icon-512.png'

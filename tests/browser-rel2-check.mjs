@@ -25,6 +25,7 @@ try{
   browser=await chromium.launch({headless:true,...(process.env.SPARK_CHROMIUM_EXECUTABLE?{executablePath:process.env.SPARK_CHROMIUM_EXECUTABLE}:{})});
   const context=await browser.newContext({viewport:{width:390,height:844},deviceScaleFactor:1,isMobile:true,hasTouch:true});
   await context.addInitScript(({origin})=>{
+    window.SpeechRecognition=class {};
     if(localStorage.getItem('spark_kids'))return;
     localStorage.setItem('spark_kids',JSON.stringify([{name:'Barn A'},{name:'Barn B'}]));
     localStorage.setItem('spark_device_token','rel2-browser-fixture');
@@ -32,6 +33,8 @@ try{
   },{origin:api});
   let received;
   const firstRequest=new Promise(resolve=>{received=resolve;});
+  let receivedFollowup;
+  const followupRequest=new Promise(resolve=>{receivedFollowup=resolve;});
   await context.route(api+'/chat',async route=>{
     calls.push(route.request().postDataJSON());
     if(calls.length===1){
@@ -40,8 +43,13 @@ try{
       await route.abort().catch(()=>{});
     }else if(calls.length===2){
       await route.fulfill({status:503,json:{kind:'provider_error'}});
+    }else if(calls.length===4){
+      receivedFollowup();
+      await new Promise(resolve=>{release=resolve;});
+      await route.abort().catch(()=>{});
     }else{
-      await route.fulfill({json:{text:'Prøv å forklare med egne ord.',provider:'gemini'}});
+      const text=calls.length===3?'Prøv å forklare med egne ord.':'Nå kan vi fortsette.';
+      await route.fulfill({json:{text,provider:'gemini'}});
     }
   });
   async function open(){
@@ -93,6 +101,46 @@ try{
   assert.equal(await page.locator('#chatBox .row.me').count(),1);
   assert.deepEqual(calls.map(c=>c.messages),Array(3).fill(calls[0].messages));
 
+  const missed='Jeg så på skyene.';
+  const next='Hva skjer med dråpene?';
+  await page.locator('#msg').fill(missed);
+  await page.locator('#sendBtn').tap();
+  await followupRequest;
+  await page.close();release();
+  page=await open();
+  await page.locator('#resumeBtn').tap();
+  await page.getByText('Spark mangler et svar på den siste meldingen.').waitFor();
+
+  const locked=['#msg','#sendBtn','#micBtn','#stuckBtn','#nextLearningTask'];
+  for(const selector of locked)assert.equal(await page.locator(selector).isDisabled(),true,selector);
+  await page.evaluate(()=>{
+    const write=Storage.prototype.setItem;
+    Storage.prototype.setItem=function(key,value){
+      if(key==='spark_session_0'&&window.failSessionWrite)throw Error('QuotaExceededError');
+      return write.call(this,key,value);
+    };
+    window.failSessionWrite=true;
+  });
+  await page.locator('#continueTurn').tap();
+  await page.locator('#status').getByText(/Kunne ikke lagre/).waitFor();
+  for(const selector of locked)assert.equal(await page.locator(selector).isDisabled(),true,selector);
+  assert.equal(await page.locator('#retryTurn').count(),1);
+  await page.evaluate(()=>{window.failSessionWrite=false;});
+  await page.locator('#continueTurn').tap();
+  for(const selector of locked)assert.equal(await page.locator(selector).isEnabled(),true,selector);
+  assert.equal(calls.length,4);
+
+  await page.reload();
+  await page.locator('#resumeBtn').tap();
+  assert.equal(await page.locator('#continueTurn').count(),0);
+  await page.locator('#msg').fill(next);
+  await page.locator('#sendBtn').tap();
+  await page.getByText('Nå kan vi fortsette.').waitFor();
+  assert.equal(calls.length,5);
+  assert.equal(calls[4].messages.at(-1).content,missed+'\n\n'+next);
+  assert.equal(await page.locator('#chatBox .row.me').getByText(missed,{exact:true}).count(),1);
+  assert.equal(await page.locator('#chatBox .row.me').getByText(next,{exact:true}).count(),1);
+
   await page.locator('#msg').fill('Kladde fra Barn A');
   await page.goBack();
   await page.locator('#resumeBtn').tap();
@@ -125,11 +173,43 @@ try{
   assert.equal((await page.reload()).status(),200);
   await page.locator('#resumeBtn').tap();
   assert.equal(await page.locator('#msg').inputValue(),'Kladde fra Barn A');
+  await page.locator('#backBtn').tap();
+  await page.locator('#modeTabs [data-t="matte"]').tap();
+  await page.locator('#hwT').fill('Kladde for A: 24 + 37');
+  await page.evaluate(()=>{
+    Object.defineProperty(document,'hidden',{configurable:true,value:true});
+    document.dispatchEvent(new Event('visibilitychange'));
+    Object.defineProperty(document,'hidden',{configurable:true,value:false});
+    document.dispatchEvent(new Event('visibilitychange'));
+    delete document.hidden;
+  });
+  assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('spark_task_draft_0')).text),'Kladde for A: 24 + 37');
+  await page.goBack();
+  await page.reload();
+  assert.equal(await page.locator('#hwT').inputValue(),'Kladde for A: 24 + 37');
+  assert.equal(await page.locator('#modeTabs .on').getAttribute('data-t'),'matte');
+  await page.locator('#kidPick [data-i="1"]').tap();
+  await page.getByText('Velg bildet på nytt for å fortsette.').waitFor();
+  assert.equal(await page.locator('#drop img').count(),0);
+  assert.equal(await page.evaluate(()=>localStorage.getItem('spark_task_draft_1').includes('base64')),false);
+  await page.locator('#modeTabs [data-t="lesing"]').tap();
+  await page.locator('#inTabs [data-m="text"]').tap();
+  await page.locator('#hwT').fill('Kladde for B: les teksten');
+  await page.evaluate(()=>dispatchEvent(new PageTransitionEvent('pagehide')));
+  await page.close();
+  page=await open();
+  assert.equal(await page.locator('#hwT').inputValue(),'Kladde for B: les teksten');
+  assert.equal(await page.locator('#modeTabs .on').getAttribute('data-t'),'lesing');
+  await page.locator('#kidPick [data-i="0"]').tap();
+  assert.equal(await page.locator('#hwT').inputValue(),'Kladde for A: 24 + 37');
+  await page.locator('#resumeBtn').tap();
+  assert.equal(await page.locator('#msg').inputValue(),'Kladde fra Barn A');
   assert.deepEqual(errors,[]);
   console.log(JSON.stringify({result:'PASS',viewport:'390x844',checks:[
     'damaged, resized and cancelled photos','close and reopen during request','child ownership','503 and identical retry','browser back and draft',
     'waiting service-worker update','offline reload','activation after tab closes','mismatched missing file refused',
-    'matching missing file recovered'
+    'matching missing file recovered','continue without an answer after tab close','recovery save failure and control state',
+    'continued conversation after reload','per-child task drafts across background, Back and pagehide','photo reselection after reopen'
   ],pageErrors:errors}));
   await context.close();
 }finally{
