@@ -1,53 +1,69 @@
-/* Spark stabilization generation. API traffic never enters this cache. */
-const CACHE = 'spark-learning-20261103-int1';
-const FILES = ['./spark.html', './manifest.json', './arithmetic.js', './learning.js', './visuals.js', './learning-ui.js', './icon-192.png', './icon-512.png'];
-const STATIC_URLS = new Set(FILES.map(path => new URL(path, self.registration.scope).href));
+/* Cache one verified app generation. API traffic never enters this cache. */
+const CACHE = 'spark-family-20261123-rel2';
+const CODE = {
+  './spark.html':'8b2b37987e50c0e5559e68e5794e23d146a8db81650e316b061ffb9710158da6',
+  './arithmetic.js':'05f0cf40c6c7651773e28e12de3083461060a34b5ed7d48e86e0128733b83257',
+  './learning.js':'923ce0b56ea1bba469f905ca362cb13a64c21ee275eedff181bd7e64f7faa87e',
+  './visuals.js':'97f04390e2fae59b583d6e154aaa629ddd4eccc45f45f207d99b46798a3aa611',
+  './learning-ui.js':'06af0d9dc8b4e400c179d672a7a3c4b07719f455cab7d01fddb63de584af8d47',
+};
+const STATIC = new Map([
+  ...Object.keys(CODE), './manifest.json', './icon-192.png', './icon-512.png'
+].map(path => [new URL(path,self.registration.scope).href,CODE[path]]));
 
-self.addEventListener('install', e => {
-  e.waitUntil(caches.open(CACHE)
-    .then(c => c.addAll(FILES.map(path => new Request(new URL(path, self.registration.scope), {cache:'reload'}))))
-    .then(() => self.skipWaiting()));
-});
+async function matchesGeneration(response,digest){
+  if(!response?.ok || response.redirected)return false;
+  if(!digest)return true;
+  const normalized=(await response.clone().text()).replace(/\r\n/g,'\n');
+  const hash=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(normalized));
+  return Array.from(new Uint8Array(hash),b=>b.toString(16).padStart(2,'0')).join('')===digest;
+}
 
-self.addEventListener('activate', e => {
-  e.waitUntil(
-    caches.keys()
-      .then(ks => Promise.all(ks.filter(k => k.startsWith('spark-') && k !== CACHE).map(k => caches.delete(k))))
-      .then(() => self.clients.claim())
-  );
-});
-
-self.addEventListener('fetch', e => {
-  const url = new URL(e.request.url);
-
-  if (e.request.method !== 'GET' || url.origin !== self.location.origin) return;
-  const navigation = e.request.mode === 'navigate' && url.pathname.startsWith(new URL(self.registration.scope).pathname);
-  const canonical = new URL(url.href); canonical.search = ''; canonical.hash = '';
-  if (!navigation && !STATIC_URLS.has(canonical.href)) return;
-  const key = navigation ? new URL('./spark.html', self.registration.scope).href : canonical.href;
-  const opened = caches.open(CACHE);
-  const network = fetch(e.request).then(async response => {
-    const cache = await opened;
-    if (response.ok && !response.redirected && (response.type === 'basic' || response.type === 'default')) {
-      // Root navigation may contain an index redirect, not the app shell.
-      if (!navigation || canonical.pathname.endsWith('/spark.html')) {
-        try { await cache.put(key, response.clone()); } catch {}
+self.addEventListener('install', e=>{
+  e.waitUntil((async()=>{
+    const cache=await caches.open(CACHE);
+    try{
+      await cache.addAll([...STATIC.keys()].map(url=>new Request(url,{cache:'reload'})));
+      for(const [url,digest] of STATIC){
+        if(digest&&!await matchesGeneration(await cache.match(url),digest))throw Error('Incomplete Spark release');
       }
+    }catch(err){
+      await caches.delete(CACHE);
+      throw err;
     }
-    return response.ok ? response : (await cache.match(key)) || response;
-  });
-  e.waitUntil(network.catch(() => {}));
-  e.respondWith((async () => {
-    const cache = await opened;
-    let timer;
-    const delayedCache = new Promise(resolve => {
-      timer = setTimeout(async () => {
-        const cached = await cache.match(key);
-        if (cached) resolve(cached);
-      }, 3500);
-    });
-    try { return await Promise.race([network, delayedCache]); }
-    catch { return (await cache.match(key)) || Response.error(); }
-    finally { clearTimeout(timer); }
+    // An update waits until existing homework tabs close.
+  })());
+});
+
+self.addEventListener('activate', e=>{
+  e.waitUntil(caches.keys()
+    .then(keys=>Promise.all(keys.filter(key=>key.startsWith('spark-')&&key!==CACHE).map(key=>caches.delete(key))))
+    .then(()=>self.clients.claim()));
+});
+
+async function getAsset(cache,url){
+  const cached=await cache.match(url);
+  if(cached)return cached;
+  try{
+    const response=await fetch(new Request(url,{cache:'reload',signal:AbortSignal.timeout(4000)}));
+    if(!await matchesGeneration(response,STATIC.get(url)))return null;
+    try{await cache.put(url,response.clone());}catch{}
+    return response;
+  }catch{return null;}
+}
+
+self.addEventListener('fetch', e=>{
+  const url=new URL(e.request.url);
+  if(e.request.method!=='GET'||url.origin!==self.location.origin)return;
+  const navigation=e.request.mode==='navigate'&&url.pathname.startsWith(new URL(self.registration.scope).pathname);
+  url.search='';url.hash='';
+  if(!navigation&&!STATIC.has(url.href))return;
+  e.respondWith((async()=>{
+    const cache=await caches.open(CACHE);
+    if(!navigation)return (await getAsset(cache,url.href))||Response.error();
+    const app=await Promise.all(Object.keys(CODE).map(path=>getAsset(cache,new URL(path,self.registration.scope).href)));
+    return app.every(Boolean)?app[0]:new Response(
+      '<!doctype html><html lang="nb"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Spark</title><p>Spark mangler appfiler. Koble til nettet, lukk alle Spark-faner og åpne Spark igjen.</p></html>',
+      {status:503,headers:{'content-type':'text/html; charset=utf-8'}});
   })());
 });
