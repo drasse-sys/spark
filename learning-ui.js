@@ -36,10 +36,42 @@ function initHomeworkLearning(text){
   if(taskMode==='lesing'){learningSession.readingText=text.slice(0,12000);learningSession.readingGoal='comprehension';}
 }
 function learningContext(){return L.context(ensureLearning(),kid().learning);}
+// A session snapshot owns progress until the profile write succeeds.
+function stageLearningProgress(session){
+  const progress=session.progress ||= {skills:{},words:{}};
+  progress.id=newSessionId();
+  return progress;
+}
+function withLearningProgress(profile,progress){
+  if(!progress?.id||profile.learningCommit===progress.id)return profile;
+  const memory=profile.learning;
+  return {...profile,learningCommit:progress.id,learning:{...memory,
+    skills:{...memory.skills,...progress.skills},totals:progress.totals||memory.totals,
+    items:memory.items.map(word=>progress.words?.[word.id]||word)
+  }};
+}
+function flushSessionLearning(session,index=active){
+  if(!session?.progress)return;
+  const previous=kids[index], updated=withLearningProgress(previous,session.progress);
+  if(updated!==previous){
+    kids[index]=updated;
+    if(!saveKids()){kids[index]=previous;return;}
+  }
+  delete session.progress;
+}
 function recordLearning(ok,verified,kind='task',error='',confidence=''){
-  const s=ensureLearning(),t=s.task;
-  const e=L.event(kid().learning,t.skill,{id:s.id+':'+t.id+':'+t.attempts,t:Date.now(),sid:s.id,s:t.s,ok,verified,k:kind,e:error,c:confidence});
-  if(e){s.events.push({...e,skill:t.skill});L.boundSession(s);saveKids();}
+  const s=ensureLearning(),t=s.task,memory=kid().learning;
+  const prior=s.progress?.skills[t.skill]||memory.skills[t.skill];
+  const change={skills:prior?{[t.skill]:{...prior,ev:prior.ev.slice()}}:{},
+    totals:{...(s.progress?.totals||memory.totals)}};
+  const e=L.event(change,t.skill,{id:s.id+':'+t.id+':'+t.attempts,t:Date.now(),sid:s.id,s:t.s,ok,verified,k:kind,e:error,c:confidence});
+  if(e){
+    const progress=stageLearningProgress(s);
+    progress.skills[t.skill]=change.skills[t.skill];
+    progress.totals=change.totals;
+    s.events.push({...e,skill:t.skill});
+    L.boundSession(s);
+  }
   return e;
 }
 function offerTransfer(){
@@ -115,9 +147,9 @@ function preparePractice(){
   if(saved){
     if(!confirm('Den uferdige økten lagres før du begynner å øve. Fortsette?'))return false;
     chatMsgs=saved.chatMsgs;history=saved.history;transcript=saved.transcript;taskMode=saved.mode;currentSessionId=saved.id;restoreLearning(saved);
-    if(!archiveSession(saved.pendingFinal?.summary||''))return false;
+    if(!archiveSession(saved.pendingFinal?.summary||'',saved.startedDraftId||''))return false;
   }
-  stopSpeak();stopMic();readOnly=false;pendingFinal=null;pendingTurn=false;turnNotice='';chatMsgs=[];history=[];transcript='';currentSessionId='';$('msg').value='';taskMode='matte';freshLearning();learningSession.practice=true;view='chat';return true;
+  stopSpeak();stopMic();readOnly=false;pendingFinal=null;pendingTurn=false;turnNotice='';chatMsgs=[];history=[];transcript='';currentSessionId='';startedDraftId='';$('msg').value='';taskMode='matte';freshLearning();learningSession.practice=true;view='chat';return true;
 }
 function startPractice(type){
   const memory=kid().learning ||= L.empty(),now=Date.now();
@@ -135,12 +167,16 @@ function advancePractice(){
 }
 function wordItem(item){return {skill:'readWord',word:true,itemId:item.id,prompt:item.meaning?'Hvilket ord fra ordlisten betyr «'+item.meaning+'»?':'Skriv ordet du hører.',answer:item.word,sentence:item.sentence};}
 function recordWord(item,ok,s,c){
-  const w=kid().learning.items.find(w=>w.id===item.itemId);if(!w)return;
+  const session=ensureLearning();
+  const prior=session.progress?.words[item.itemId]||kid().learning.items.find(w=>w.id===item.itemId);
+  if(!prior)return;
+  const w={...prior};
   const now=Date.now(),delayed=w.lastAt&&now-w.lastAt>=L.DAY;
   if(ok&&s<=1&&c!=='gjetter'&&delayed)w.box=Math.min(5,(w.box||1)+1);else if(!ok||s>=3)w.box=Math.max(1,(w.box||1)-1);
   w.box ||=1;w.lastAt=now;w.due=now+L.SPACING[w.box-1]*L.DAY;
-  w.ev ||= [];w.ev.push({t:now,s,ok,delayed:!!delayed});w.ev=w.ev.slice(-8);
-  ensureLearning().events.push({skill:'readWord',t:now,s,ok,verified:true,k:'word',delayed:!!delayed,item:true});L.boundSession(learningSession);saveKids();
+  w.ev=[...(w.ev||[]),{t:now,s,ok,delayed:!!delayed}].slice(-8);
+  stageLearningProgress(session).words[w.id]=w;
+  session.events.push({skill:'readWord',t:now,s,ok,verified:true,k:'word',delayed:!!delayed,item:true});L.boundSession(session);
 }
 function helpStep(n){
   if(busy||readOnly||pendingTurn||pendingFinal)return;
