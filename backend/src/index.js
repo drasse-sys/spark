@@ -12,7 +12,7 @@ const MINUTE = /per minute|requests per minute|tokens per minute|\bRPM\b|\bTPM\b
 const CHAIN_BUDGET_MS = 45000, ATTEMPT_MS = 20000, MIN_ATTEMPT_MS = 5000;
 const PROMPT_VERSION = 'v5.4-c3r1';
 // Worker release identity reported by /health. Bump this string (<tag>-<yyyymmdd>) in every release that deploys the Worker.
-const GENERATION = 'rh1-20261031';
+const GENERATION = 'rel4-20261123';
 const enc = new TextEncoder();
 
 function json(data, status=200, extra={}){
@@ -539,11 +539,12 @@ async function geminiOnce(env, system, messages, model, timeout=ATTEMPT_MS){
   }
   return text;
 }
-async function callGemini(env, system, messages, clock=Date.now){
+async function callGemini(env, system, messages, clock=Date.now, onAttempt=()=>{}){
   let last;const tried=[];const deadline=clock()+CHAIN_BUDGET_MS;
   for(const model of GEMINI_CHAIN){
     const remaining=deadline-clock();
     if(last&&remaining<MIN_ATTEMPT_MS) break;
+    onAttempt();
     try{return {text:await geminiOnce(env,system,messages,model,Math.min(ATTEMPT_MS,remaining)),model};}
     catch(e){
       last=e;tried.push(model+':'+diagnose(e).reason);try{e.tried=tried;}catch{}
@@ -566,18 +567,24 @@ function backupMessages(system,messages,transcript){
   }
   return out;
 }
-async function callBackup(env, system, messages, transcript){
-  const provider=String(env.BACKUP_PROVIDER||'none').toLowerCase();
+const PUBLIC_BACKUP_MODELS={openrouter:'openrouter/free',groq:'openai/gpt-oss-120b'};
+function backupProvider(env){
+  const name=String(env.BACKUP_PROVIDER||'none').toLowerCase();
+  return Object.hasOwn(PUBLIC_BACKUP_MODELS,name)?name:'none';
+}
+async function callBackup(env, system, messages, transcript, onAttempt){
+  const provider=backupProvider(env);
   let url,key,model;
   if(provider==='openrouter'){
     url='https://openrouter.ai/api/v1/chat/completions'; key=env.OPENROUTER_API_KEY;
-    model=env.OPENROUTER_MODEL||'openrouter/free';
+    model=env.OPENROUTER_MODEL||PUBLIC_BACKUP_MODELS.openrouter;
   }else if(provider==='groq'){
     url='https://api.groq.com/openai/v1/chat/completions'; key=env.GROQ_API_KEY;
-    model=env.GROQ_MODEL||'openai/gpt-oss-120b';
+    model=env.GROQ_MODEL||PUBLIC_BACKUP_MODELS.groq;
   }else return null;
   if(!key) return null;
   if(hasImage(messages)&&!transcript) throw Object.assign(new Error('Dagskvoten er tom før bildet rakk å bli skrevet av. Skriv oppgaven som tekst, så kan reserven fortsette.'),{spark:true});
+  onAttempt();
   const r=await providerFetch(url,{
     method:'POST',signal:AbortSignal.timeout(20000),headers:{'content-type':'application/json','authorization':'Bearer '+key},
     body:JSON.stringify({model,max_tokens:700,messages:backupMessages(system,messages,transcript)})
@@ -701,7 +708,7 @@ export default {
     const url=new URL(request.url);
 
     if(url.pathname==='/health' && request.method==='GET'){
-      return json({ok:true,service:'spark-api',backup:String(env.BACKUP_PROVIDER||'none'),promptVersion:PROMPT_VERSION,generation:GENERATION},200,c.headers);
+      return json({ok:true,service:'spark-api',backup:backupProvider(env),promptVersion:PROMPT_VERSION,generation:GENERATION},200,c.headers);
     }
 
     if(url.pathname==='/pair' && request.method==='POST'){
@@ -718,6 +725,7 @@ export default {
     }
 
     if(url.pathname==='/chat' && request.method==='POST'){
+      const started=Date.now();
       const auth=request.headers.get('authorization')||'';
       const token=auth.replace(/^Bearer\s+/i,'');
       const device=await verifyToken(env,token);
@@ -729,16 +737,26 @@ export default {
       const body=parsed.body;
       const problem=validatePayload(body); if(problem) return json({error:problem},400,c.headers);
       const system=buildSystemPrompt(body);
+      let attempts=0;
+      const countAttempt=()=>{attempts++;};
+      const gemini=async(prompt)=>({...await callGemini(env,prompt,body.messages,Date.now,countAttempt),provider:'gemini'});
+      const backup=prompt=>callBackup(env,prompt,body.messages,body.transcript||'',countAttempt);
+      const respond=async(first,retry)=>{
+        const {text,provider,model,verifier}=await checkedReply(first,note=>retry(system+'\n'+note));
+        // Only ship the public model names Spark knows. Configured private aliases stay on the Worker.
+        const publicModel=provider==='gemini'?GEMINI_CHAIN.includes(model):model===PUBLIC_BACKUP_MODELS[provider];
+        return json({text,provider,...(publicModel?{model}:{}),verifier,timing:{
+          serverMs:Math.max(0,Math.min(300000,Date.now()-started)),multipleAttempts:attempts>1
+        }},200,c.headers);
+      };
       try{
         try{
-          const g=await callGemini(env,system,body.messages);
-          const checked=await checkedReply({...g,provider:'gemini'},async note=>({...await callGemini(env,system+'\n'+note,body.messages),provider:'gemini'}));
-          return json(checked,200,c.headers);
+          return await respond(await gemini(system),gemini);
         }catch(e){
           const q=errorInfo(e);
           if(q.daily){
-            const b=await callBackup(env,system,body.messages,body.transcript||'');
-            if(b) return json(await checkedReply(b,note=>callBackup(env,system+'\n'+note,body.messages,body.transcript||'')),200,c.headers);
+            const b=await backup(system);
+            if(b)return await respond(b,backup);
           }
           const kind=q.minute?'minute_quota':(q.daily?'daily_quota':'provider_error');
           logProviderFailure(kind,e,env);

@@ -2,8 +2,8 @@
 
 Manual, controlled steps. Details and rationale: [CF2 handoff](2026-10-31-SPARK-CF2-Release-Handoff.md) (deploy order, Pages timing note, phone smoke list).
 
-1. [ ] **CI green** on the PR's final head (`ci` job: installs, tests, syntax, Worker dry-run, both browser checks).
-2. [ ] **Bump identities** if the release changes them: `GENERATION` in `backend/src/index.js` (Worker, shown by `/health`) and `CACHE` in `sw.js` (frontend).
+1. [ ] **CI green** on the PR's final head (`ci` job: installs, tests, syntax, Worker dry-run, browser checks).
+2. [ ] **Bump identities** if the release changes them: `GENERATION` in `backend/src/index.js` (Worker, shown by `/health`) and the `spark-release` meta tag in `spark.html` (frontend). Run `node scripts/sync-pwa.mjs` to regenerate the cache name and file hashes after frontend changes.
 3. [ ] **Worker dry-run:** `cd backend && npx wrangler deploy --dry-run`.
 4. [ ] **Worker deploy:** `cd backend && npx wrangler deploy` (output must list the observability setting).
 5. [ ] **Capture the Worker Version ID** from the deploy output; record it with the previous ID (see rollback).

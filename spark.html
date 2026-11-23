@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="spark-release" content="rel4-20261123">
 <meta name="theme-color" content="#FF6B6B">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -49,6 +50,11 @@ font-family:inherit;width:100%;transition:transform .15s}
 .btn.ghost{background:#f3f0ff;color:#7c5cbf}
 .btn.sm{padding:10px;font-size:14px}
 #continueTurn{margin-top:8px}
+#sparkStatus h3{font-size:13px;margin:12px 0 4px}
+#sparkStatus dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:3px 10px;margin:0;font-size:12px}
+#sparkStatus dd{margin:0;overflow-wrap:anywhere}
+#sparkUpdateReady,.spark-status-actions{margin-top:10px}
+.spark-status-actions{display:flex;gap:8px}
 .note{background:#FFF9E6;border-radius:12px;padding:11px 14px;font-size:11.5px;
 color:#8B6914;line-height:1.6;font-weight:600}
 .note.warn{background:#FFF0F0;color:#A03030}
@@ -110,7 +116,7 @@ width:44px;height:44px;font-size:18px;cursor:pointer;flex-shrink:0}
 .send:disabled,.mic:disabled{opacity:.45;cursor:not-allowed}
 .stars{display:flex;align-items:center;gap:3px;background:rgba(255,255,255,.25);
 border-radius:11px;padding:5px 8px;font-size:12px;font-weight:900;color:#fff}
-.prof{background:#F4F9F4;border-radius:12px;padding:11px 14px;font-size:11.5px;
+.prof,#sparkStatus{background:#F4F9F4;border-radius:12px;padding:11px 14px;font-size:11.5px;
 color:#2E5C3E;line-height:1.65;font-weight:600}
 .prof li{margin:3px 0}
 .hide{display:none!important}
@@ -149,6 +155,7 @@ color:#2E5C3E;line-height:1.65;font-weight:600}
 <script src="learning.js"></script>
 <script src="visuals.js"></script>
 <script src="learning-ui.js"></script>
+<script src="parent-status.js"></script>
 <script>
 /* ================= SPARK v5.3 =================
    Privat Worker beskytter leverandørnøkler.
@@ -381,6 +388,7 @@ if(synth){
     refreshVoices();
     if($('fVoice')) $('fVoice').innerHTML=voiceOptions();
     if(pickVoice()){ voiceNotice=''; showStatus(); }
+    paintSparkStatus();
   });
 }
 function speechText(text){
@@ -493,12 +501,15 @@ function saveSession({awaitingReply=pendingTurn}={}){
     return saved;
   }catch(e){ storageWarning='Kunne ikke lagre økten. Behold appen åpen og prøv igjen.';showStatus();return false; }
 }
+function isUnfinishedSession(s,i){
+  return s?.kid===i && s.recoveryId===kids[i]?.recoveryId && Object.hasOwn(MODE_NAME,s.mode) &&
+    validChat(s.chatMsgs) && validHistory(s.history) && typeof s.transcript==='string' &&
+    !(s.id && kids[i]?.sessions.some(archived=>archived.id===s.id));
+}
 function loadSession(i=active){
   try{
     const s = JSON.parse(store.getItem(sessionKey(i))||'null');
-    if(!s || s.kid!==i || !Object.hasOwn(MODE_NAME,s.mode) || !validChat(s.chatMsgs) || !validHistory(s.history) || typeof s.transcript!=='string') return null;
-    if(s.recoveryId!==kids[i]?.recoveryId) return null;
-    if(s.id && kids[i]?.sessions.some(archived=>archived.id===s.id)) return null;
+    if(!isUnfinishedSession(s,i))return null;
     if(s.learning?.id===s.id)flushSessionLearning(s.learning,i);
     const savedAt=[s.ts,s.migratedAt].find(t=>Number.isSafeInteger(t)&&t>0);
     if(savedAt&&Date.now()-savedAt>=30*L.DAY){
@@ -568,7 +579,7 @@ function archiveSession(summary='',draftId=startedDraftId){
 const DAILY = /per day|daily limit|requests per day|\bRPD\b|GenerateRequestsPerDay|dagskvote/i;
 const MINUTE = /per minute|requests per minute|tokens per minute|\bRPM\b|\bTPM\b|rate limit|for mange forespørsler/i;
 function errText(err){ return ((err&&err.message)||'') + ' ' + ((err&&err.details)||''); }
-function isDailyQuota(err){ return DAILY.test(errText(err)); }
+function isDailyQuota(err){ return err?.kind==='daily_quota' || DAILY.test(errText(err)); }
 function isMinuteQuota(err){
   const t=errText(err);
   return !isDailyQuota(err) && (err?.kind==='minute_quota' || err?.status===429 || MINUTE.test(t) || /RESOURCE_EXHAUSTED|429/i.test(t));
@@ -582,7 +593,7 @@ async function fetchServer(path, options, base){
     return {r,d};
   }
   catch(err){
-    if(controller.signal.aborted) throw new Error('Spark-serveren brukte for lang tid. Vent litt og prøv igjen.');
+    if(controller.signal.aborted) throw Object.assign(new Error('Spark-serveren brukte for lang tid. Vent litt og prøv igjen.'),{name:'TimeoutError'});
     throw err;
   }finally{clearTimeout(timer);}
 }
@@ -636,27 +647,34 @@ function providerMessages(messages){
   return turns;
 }
 let usingBackup = false;
-async function callAI(messages){
+async function callAI(messages,responseStarted=performance.now()){
   if(!paired()) throw new Error('Denne enheten er ikke koblet til Spark-serveren. Åpne ⚙️ Innstillinger.');
-  const k=kid();
-  const {r,d:data}=await fetchServer('/chat',{
-    method:'POST',
-    headers:{'content-type':'application/json','authorization':'Bearer '+deviceToken},
-    body:JSON.stringify({mode:taskMode,age:k.age,name:k.name||'',interests:k.interests||'',notes:(k.notes||[]).slice(-8),sessionState:learningContext(),messages:providerMessages(messages),transcript:transcript||''})
-  });
-  const d=data||{};
-  if(r.status===401 && !d.kind){
-    unpairDevice();
-    const e=new Error('Koblingen til Spark-serveren er utløpt. En forelder må koble denne enheten på nytt i ⚙️.');
-    e.status=401; throw e;
+  const started=performance.now();
+  try{
+    const k=kid();
+    const {r,d:data}=await fetchServer('/chat',{
+      method:'POST',
+      headers:{'content-type':'application/json','authorization':'Bearer '+deviceToken},
+      body:JSON.stringify({mode:taskMode,age:k.age,name:k.name||'',interests:k.interests||'',notes:(k.notes||[]).slice(-8),sessionState:learningContext(),messages:providerMessages(messages),transcript:transcript||''})
+    });
+    const d=data||{};
+    if(r.status===401 && !d.kind){
+      unpairDevice();
+      const e=new Error('Koblingen til Spark-serveren er utløpt. En forelder må koble denne enheten på nytt i ⚙️.');
+      e.status=401; throw e;
+    }
+    if(!r.ok || typeof d.text!=='string' || !d.text.trim()){
+      const e=new Error(d.error||(r.ok?'Spark fikk et ufullstendig svar. Prøv igjen.':'Spark-serverfeil ('+r.status+')'));
+      e.status=r.status; e.kind=d.kind||''; e.details=(d.kind||'')+' '+(d.details||''); throw e;
+    }
+    recordSparkTiming(responseStarted,'normal',d);
+    ensureLearning().interventions+=(d.verifier?.interventions||0);
+    usingBackup = d.provider && d.provider!=='gemini';
+    return d.text.trim();
+  }catch(error){
+    recordSparkTiming(started,sparkFailureKind(error));
+    throw error;
   }
-  if(!r.ok || typeof d.text!=='string' || !d.text.trim()){
-    const e=new Error(d.error||(r.ok?'Spark fikk et ufullstendig svar. Prøv igjen.':'Spark-serverfeil ('+r.status+')'));
-    e.status=r.status; e.kind=d.kind||''; e.details=(d.kind||'')+' '+(d.details||''); throw e;
-  }
-  ensureLearning().interventions+=(d.verifier?.interventions||0);
-  usingBackup = d.provider && d.provider!=='gemini';
-  return d.text.trim();
 }
 
 /* ============ PROFIL-LÆRING + POENG ============ */
@@ -783,9 +801,10 @@ function renderSetup(){
     <div class="center">
       <div class="big">🔧</div>
       <div class="t1">Innstillinger</div>
-      <div class="t2">Til foreldre 👇 · Spark v5.3</div>
+      <div class="t2">Til foreldre 👇</div>
     </div>
 
+    ${sparkStatusHTML()}
     <div>
       <label>🔐 Koble til Spark</label>
       <details><summary>Avansert: serveradresse</summary>
@@ -867,6 +886,7 @@ ${parentHTML()}
   </div>`;
 
   bindParent();
+  bindSparkStatus();
   document.querySelectorAll('#kidRow .kid[data-i]').forEach(t=>t.onclick=()=>{
     if(busy || !saveForm()) return; chooseChild(parseInt(t.dataset.i,10)); render();
   });
@@ -1128,9 +1148,9 @@ async function turn(){
   stopSpeak(); stopMic(); busy=true; render();
   await requestTurn();
 }
-async function requestTurn(retried){
+async function requestTurn(retried,started=performance.now()){
   try{
-    const raw = await callAI(payload());
+    const raw = await callAI(payload(),started);
     history.push({role:'assistant',content:raw});
     const shown = harvest(raw);
     if(usingBackup && !backupAnnounced){
@@ -1154,7 +1174,7 @@ async function requestTurn(retried){
       render();
       await new Promise(r=>setTimeout(r,30000));
       chatMsgs.pop();
-      return requestTurn(true);
+      return requestTurn(true,started);
     }
 
     busy=false;
@@ -1307,7 +1327,7 @@ loadTaskDraft();
 sweepSessions();
 /* PWA: registrer service worker hvis appen kjøres fra en ekte nettadresse */
 if('serviceWorker' in navigator && location.protocol.startsWith('http')){
-  navigator.serviceWorker.register('sw.js', {updateViaCache:'none'}).catch(()=>{});
+  navigator.serviceWorker.register('sw.js', {updateViaCache:'none'}).then(watchSparkRegistration).catch(()=>{});
 }
 
 window.addEventListener('pagehide',()=>{

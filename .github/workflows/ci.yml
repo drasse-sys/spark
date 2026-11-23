@@ -45,7 +45,7 @@ jobs:
       - name: JavaScript syntax checks
         run: |
           set -e
-          for f in arithmetic.js learning.js visuals.js learning-ui.js sw.js backend/src/index.js tests/*.mjs; do
+          for f in arithmetic.js learning.js visuals.js learning-ui.js parent-status.js sw.js backend/src/index.js scripts/*.mjs tests/*.mjs; do
             node --check "$f"
           done
           node -e "JSON.parse(require('fs').readFileSync('manifest.json','utf8'))"
@@ -74,3 +74,6 @@ jobs:
 
       - name: Browser family reliability check
         run: node tests/browser-rel2-check.mjs
+
+      - name: Browser parent status check
+        run: node tests/browser-rel4-check.mjs

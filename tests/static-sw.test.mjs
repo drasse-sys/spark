@@ -4,10 +4,12 @@ import vm from 'node:vm';
 import {webcrypto} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {read,root,script,html} from './helpers.mjs';
 
 test('frontend, Worker, service-worker syntax and manifest/TOML parse; static paths exist',()=>{
-  new vm.Script(script);new vm.Script(read('sw.js'));
+  new vm.Script(script);new vm.Script(read('sw.js'));new vm.Script(read('parent-status.js'));
+  execFileSync(process.execPath,[fileURLToPath(new URL('scripts/sync-pwa.mjs',root)),'--check']);
   new vm.Script(read('backend/src/index.js').replace(/^import .*;$/gm,'').replace('export default','const worker ='));
   const manifest=JSON.parse(read('manifest.json'));assert.equal(manifest.scope,'./');assert.equal(manifest.start_url,'./spark.html');
   for(const path of [manifest.start_url,...manifest.icons.map(i=>i.src),'sw.js'])assert.ok(existsSync(new URL(path,root)),path);
@@ -19,7 +21,7 @@ test('frontend, Worker, service-worker syntax and manifest/TOML parse; static pa
   assert.ok(!/user-scalable=no/.test(html));assert.match(html,/aria-label="Svaret ditt"/);
 });
 test('no provider key formats or credential assignments in static frontend files',()=>{
-  for(const path of ['spark.html','sw.js','manifest.json']){
+  for(const path of ['spark.html','parent-status.js','sw.js','manifest.json']){
     const s=read(path);assert.ok(!/AIza[\w-]{30,}|sk-(?:or-v1-)?[A-Za-z0-9]{20,}|gsk_[A-Za-z0-9]{20,}/.test(s),path);
     assert.ok(!/(?:GEMINI_API_KEY|OPENROUTER_API_KEY|GROQ_API_KEY|FAMILY_CODE|DEVICE_SIGNING_SECRET)\s*[:=]\s*['"][^'"]+['"]/.test(s),path);
   }
